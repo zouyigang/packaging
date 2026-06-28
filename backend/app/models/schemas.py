@@ -1,0 +1,88 @@
+"""Pydantic 数据模型（对外契约）。
+
+单位约定：尺寸 mm，重量 kg。
+坐标系：原点在容器内部一个底角，x=长(length)，y=宽(width)，z=高(height, 向上)。
+详见 CLAUDE.md 第 5 节。
+"""
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
+
+# 六种轴对齐朝向：三个字母依次表示原始的 (长,宽,高) 中哪一维分别落在 x / y / z 轴。
+# 例：'LWH' 表示 x=长、y=宽、z=高（默认朝向）；'LHW' 表示把货品侧放，原本的高朝向 y。
+Orientation = Literal["LWH", "WLH", "LHW", "HWL", "WHL", "HLW"]
+ALL_ORIENTATIONS: tuple[Orientation, ...] = ("LWH", "WLH", "LHW", "HWL", "WHL", "HLW")
+
+Objective = Literal[
+    "max_utilization", "min_containers", "stability", "balanced", "center_of_gravity"
+]
+
+
+class Item(BaseModel):
+    id: str
+    name: str = ""
+    length: float = Field(gt=0)
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    weight: float = Field(ge=0, default=0.0)
+    quantity: int = Field(ge=1, default=1)
+    allowed_rotations: list[Orientation] = Field(default_factory=lambda: list(ALL_ORIENTATIONS))
+    stackable: bool = True
+    # 顶部可承重 kg：None=未指定(无限制)，0=易碎不可压，>0=承重上限。
+    max_load_top: Optional[float] = Field(ge=0, default=None)
+    category: str = ""
+
+
+class Pallet(BaseModel):
+    id: str
+    name: str = ""
+    length: float = Field(gt=0)
+    width: float = Field(gt=0)
+    deck_height: float = Field(ge=0, default=0.0)
+    max_stack_height: float = Field(gt=0)
+    max_load: float = Field(gt=0)
+    quantity: int = Field(ge=0, default=0)
+
+
+class Container(BaseModel):
+    id: str
+    name: str = ""
+    inner_length: float = Field(gt=0)
+    inner_width: float = Field(gt=0)
+    inner_height: float = Field(gt=0)
+    max_payload: float = Field(gt=0)
+    door_width: Optional[float] = None
+    door_height: Optional[float] = None
+    quantity: int = Field(ge=1, default=1)
+
+
+class Placement(BaseModel):
+    item_id: str
+    pallet_id: Optional[str] = None
+    x: float
+    y: float
+    z: float
+    orientation: Orientation
+    seq: int
+
+
+class LoadedContainer(BaseModel):
+    id: str
+    placements: list[Placement] = Field(default_factory=list)
+    volume_utilization: float = 0.0
+    weight_utilization: float = 0.0
+
+
+class Solution(BaseModel):
+    containers: list[LoadedContainer] = Field(default_factory=list)
+    unpacked: list[str] = Field(default_factory=list)
+
+
+class SolveRequest(BaseModel):
+    items: list[Item] = Field(default_factory=list)
+    pallets: list[Pallet] = Field(default_factory=list)
+    containers: list[Container] = Field(default_factory=list)
+    objective: Objective = "max_utilization"
+    use_ga: bool = False  # True 时用遗传算法对放置顺序做全局优化（更慢，更优）

@@ -1,0 +1,116 @@
+import { Canvas } from '@react-three/fiber'
+import { OrbitControls, Edges } from '@react-three/drei'
+import { useStore } from '../store/useStore'
+import { orientedDims, colorForCategory } from './geometry'
+
+const SCALE = 0.01 // mm → 场景单位（1000mm = 10）
+
+// 后端坐标 z 向上；three 默认 y 向上。映射 (x,y,z) → (x, z, y)。
+function toScene(x, y, z) {
+  return [x * SCALE, z * SCALE, y * SCALE]
+}
+
+function Box({ placement, item }) {
+  if (!item) return null
+  const [dx, dy, dz] = orientedDims(item.length, item.width, item.height, placement.orientation)
+  // box 中心（后端坐标）
+  const cx = placement.x + dx / 2
+  const cy = placement.y + dy / 2
+  const cz = placement.z + dz / 2
+  const pos = toScene(cx, cy, cz)
+  const size = [dx * SCALE, dz * SCALE, dy * SCALE] // 注意 y/z 互换
+  // 始终按类别上色；是否在托盘上由下方的托盘台面体现，不再用颜色区分。
+  const color = colorForCategory(item.category)
+  return (
+    <mesh position={pos}>
+      <boxGeometry args={size} />
+      <meshStandardMaterial color={color} />
+      <Edges color="#333" />
+    </mesh>
+  )
+}
+
+// 托盘台面：码托盘的货品底部距地有 deck_height 的台面高，画出来即托住货品、不再悬空。
+function PalletDeck({ deck }) {
+  const pos = toScene(deck.x + deck.L / 2, deck.y + deck.W / 2, deck.z + deck.H / 2)
+  const size = [deck.L * SCALE, deck.H * SCALE, deck.W * SCALE]
+  return (
+    <mesh position={pos}>
+      <boxGeometry args={size} />
+      <meshStandardMaterial color="#9c6b3f" />
+      <Edges color="#5c3d1e" />
+    </mesh>
+  )
+}
+
+// 从可见的托盘货品反推各托盘台面：按 pallet_id 分组，取最小角与托盘尺寸。
+function deriveDecks(visible, palletMap) {
+  const groups = {}
+  for (const p of visible) {
+    if (!p.pallet_id) continue
+    ;(groups[p.pallet_id] ||= []).push(p)
+  }
+  const decks = []
+  for (const [pid, ps] of Object.entries(groups)) {
+    const pdef = palletMap[pid.split('#')[0]]
+    if (!pdef) continue
+    const x = Math.min(...ps.map((p) => p.x))
+    const y = Math.min(...ps.map((p) => p.y))
+    const minItemZ = Math.min(...ps.map((p) => p.z)) // 货品底 = 台面顶
+    decks.push({ x, y, z: minItemZ - pdef.deck_height, L: pdef.length, W: pdef.width, H: pdef.deck_height })
+  }
+  return decks
+}
+
+function ContainerBox({ container }) {
+  const w = container.inner_length * SCALE
+  const h = container.inner_height * SCALE
+  const d = container.inner_width * SCALE
+  return (
+    <mesh position={[w / 2, h / 2, d / 2]}>
+      <boxGeometry args={[w, h, d]} />
+      <meshBasicMaterial transparent opacity={0.04} color="#1677ff" />
+      <Edges color="#1677ff" />
+    </mesh>
+  )
+}
+
+export default function Scene() {
+  const solution = useStore((s) => s.solution)
+  const items = useStore((s) => s.items)
+  const pallets = useStore((s) => s.pallets)
+  const containersInput = useStore((s) => s.containers)
+  const activeContainer = useStore((s) => s.activeContainer)
+  const seqCursor = useStore((s) => s.seqCursor)
+
+  const itemMap = Object.fromEntries(items.map((i) => [i.id, i]))
+  const palletMap = Object.fromEntries(pallets.map((p) => [p.id, p]))
+  const loaded = solution?.containers?.[activeContainer]
+  // 用输入容器尺寸画外框（按装载容器 id 匹配，回退第一个）
+  const cdef =
+    containersInput.find((c) => c.id === loaded?.id) || containersInput[0]
+
+  const visible = (loaded?.placements || []).filter((p) => p.seq <= seqCursor)
+  const decks = deriveDecks(visible, palletMap)
+
+  // 让相机大致对准容器中心
+  const cx = (cdef?.inner_length || 5900) * SCALE
+  const camPos = [cx * 1.2, cx * 1.0, cx * 1.4]
+
+  return (
+    <Canvas frameloop="demand" camera={{ position: camPos, fov: 50, far: 5000 }}>
+      <ambientLight intensity={0.7} />
+      <directionalLight position={[50, 80, 40]} intensity={0.8} />
+      <directionalLight position={[-40, 30, -40]} intensity={0.3} />
+      {cdef && <ContainerBox container={cdef} />}
+      {decks.map((d, i) => (
+        <PalletDeck key={`deck-${i}`} deck={d} />
+      ))}
+      {visible.map((p, i) => (
+        <Box key={`${p.item_id}-${p.seq}-${i}`} placement={p} item={itemMap[p.item_id]} />
+      ))}
+      <gridHelper args={[200, 40, '#ccc', '#eee']} />
+      <OrbitControls makeDefault target={cdef ? [cx / 2, 0, (cdef.inner_width * SCALE) / 2] : [0, 0, 0]} />
+    </Canvas>
+  )
+}

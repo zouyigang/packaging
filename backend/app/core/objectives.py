@@ -1,0 +1,152 @@
+"""可插拔优化目标（策略模式）。
+
+目标函数影响两处决策（均不改动引擎核心，运行时按名注入）：
+  1. 放置评分 placement_score：在极点启发式里，对候选放置位置打分（返回元组，越小越优）。
+  2. 容器开箱顺序 order_containers：多容器循环里决定优先用哪种容器。
+
+新增目标只需继承 Objective 并注册到 _REGISTRY。
+目标名与 schemas.Objective 字面量保持一致：
+  max_utilization / min_containers / stability / balanced
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+from ..models.schemas import Container
+from .geometry import Box
+
+ScoreFn = Callable[[Box], tuple[float, ...]]
+
+
+@dataclass
+class ScoreContext:
+    """放置评分的上下文：容器尺寸 + 当前容器内已放货物的累计质量与加权坐标。
+
+    供「重心居中」等需要全局信息的目标使用；packer 每放一件就更新累计量。
+    质量优先用重量(weight)；重量为 0 时用体积兜底（见 packer）。
+    """
+
+    inner_length: float
+    inner_width: float
+    unit_w: float = 0.0   # 当前待放件的质量（放置前由 packer 设好）
+    total_w: float = 0.0  # 已放货物累计质量
+    sum_wx: float = 0.0   # Σ 质量 × 中心x
+    sum_wy: float = 0.0   # Σ 质量 × 中心y
+
+
+class Objective:
+    """目标基类。默认策略：放置靠底→靠里→靠左；容器顺序不变。"""
+
+    name: str = "base"
+
+    def placement_score(self, box: Box) -> tuple[float, ...]:
+        x, y, z, *_ = box
+        return (z, y, x)
+
+    def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
+        """返回放置评分函数。默认忽略上下文，等同 placement_score。
+
+        需要全局信息的目标（如重心居中）覆写此方法，闭包捕获 ctx。
+        """
+        return self.placement_score
+
+    def order_containers(self, containers: list[Container]) -> list[Container]:
+        return list(containers)
+
+    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
+        """是否对某货品采用「先码托盘再装」。
+
+        默认 False：单件直接装容器在体积上总是更省（托盘有台面高 + 码放空隙开销），
+        故体积/数量类目标不码托盘。托盘的收益主要在搬运与稳定性，见各子类覆写。
+        load_efficiency = 货物体积 / 满托盘包围盒体积；count_per_pallet = 单托盘可码件数。
+        """
+        return False
+
+
+class MaxUtilization(Objective):
+    """最大空间利用率：紧贴底/里/左塞满；优先开大容器以容纳更多。"""
+
+    name = "max_utilization"
+
+    def order_containers(self, containers: list[Container]) -> list[Container]:
+        return sorted(containers, key=_volume, reverse=True)
+
+
+class MinContainers(Objective):
+    """最少容器数：优先开最大的容器，尽量把货塞进少数箱子。"""
+
+    name = "min_containers"
+
+    def order_containers(self, containers: list[Container]) -> list[Container]:
+        return sorted(containers, key=_volume, reverse=True)
+
+
+class Stability(Objective):
+    """稳定性优先：重心尽量低，且优先大底面着地。"""
+
+    name = "stability"
+
+    def placement_score(self, box: Box) -> tuple[float, ...]:
+        x, y, z, dx, dy, dz = box
+        # z 最低优先（低重心）；同高时底面积大者优先（-面积 → 越大越靠前）；再靠里/靠左。
+        return (z, -(dx * dy), y, x)
+
+    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
+        # 稳定性优先：把多件松散货物码成整托盘块更稳（降低重心、抗位移）。
+        return count_per_pallet >= 2
+
+
+class Balanced(Objective):
+    """综合平衡：以低位放置为主，兼顾靠里靠左（M2 暂等同默认策略，后续可加权）。"""
+
+    name = "balanced"
+
+    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
+        # 折中：仅当码托盘的体积开销不大（满托盘填充率够高）且能成块时才码。
+        return count_per_pallet >= 2 and load_efficiency >= 0.6
+
+
+class CenterOfGravity(Objective):
+    """重心居中：每放一件都选「放下后整体重心最接近容器水平中心」的位置。
+
+    评分主项为放置后重心到容器水平中心(长x、宽y)的偏移；次项为低 z（重心也尽量低）。
+    适合在装不满时仍让负载左右/前后均衡、避免堆在一个角而偏心。
+    注：极点法的候选点从角落生长，故无法做到完美居中，但相比靠角策略能显著减小偏心。
+    """
+
+    name = "center_of_gravity"
+
+    def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
+        cx = ctx.inner_length / 2.0
+        cy = ctx.inner_width / 2.0
+
+        def score(box: Box) -> tuple[float, ...]:
+            x, y, z, dx, dy, _dz = box
+            bx = x + dx / 2.0
+            by = y + dy / 2.0
+            m = ctx.unit_w if ctx.unit_w > 0 else dx * dy * _dz
+            nw = ctx.total_w + m  # m>0 恒成立，nw>0
+            gx = (ctx.sum_wx + m * bx) / nw
+            gy = (ctx.sum_wy + m * by) / nw
+            offset = abs(gx - cx) + abs(gy - cy)
+            return (offset, z, x, y)
+
+        return score
+
+
+def _volume(c: Container) -> float:
+    return c.inner_length * c.inner_width * c.inner_height
+
+
+_REGISTRY: dict[str, Objective] = {
+    o.name: o
+    for o in (MaxUtilization(), MinContainers(), Stability(), Balanced(), CenterOfGravity())
+}
+
+
+def get_objective(name: str) -> Objective:
+    try:
+        return _REGISTRY[name]
+    except KeyError as exc:
+        raise ValueError(f"未知优化目标: {name!r}，可选: {sorted(_REGISTRY)}") from exc
