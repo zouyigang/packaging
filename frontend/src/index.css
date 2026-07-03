@@ -482,3 +482,128 @@ button, input, textarea, select { font: inherit; }
     grid-template-columns: 1fr;
   }
 }
+.access-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.access-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.access-card {
+  min-width: 0;
+  min-height: 286px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 10px;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.access-card:hover {
+  border-color: rgba(23, 107, 255, 0.28);
+  box-shadow: var(--shadow-sm);
+}
+
+.access-card.is-active {
+  border-color: rgba(23, 107, 255, 0.48);
+  background: #f7fbff;
+}
+
+.access-card-head {
+  min-height: 24px;
+}
+
+.access-figure-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.access-figure-button svg {
+  display: block;
+  width: 100%;
+  height: 118px;
+  border-radius: 6px;
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.access-card p {
+  min-height: 54px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.access-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: auto;
+}
+
+.access-fields label {
+  min-width: 0;
+}
+
+.access-fields span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+  margin-bottom: 3px;
+}
+
+.access-fields .ant-input-number {
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  .access-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.access-locked {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.access-premium-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  color: #475467;
+  background: #f2f5f9;
+  border: 1px solid #edf1f6;
+  border-radius: 6px;
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.orientation-option,
+.orientation-option *,
+.access-card,
+.access-card * {
+  cursor: pointer;
+}
+
+.access-fields,
+.access-fields *,
+.access-premium-note,
+.access-premium-note * {
+  cursor: default;
+}

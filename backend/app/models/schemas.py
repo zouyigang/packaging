@@ -23,6 +23,7 @@ Objective = Literal[
 StackingType = Literal[
     "not_stackable", "same_item_only", "stackable", "support_only", "top_only"
 ]
+LoadingAccessSide = Literal["x_min", "x_max", "y_min", "y_max", "z_max"]
 
 
 class Item(BaseModel):
@@ -54,11 +55,28 @@ class Pallet(BaseModel):
     name: str = ""
     length: float = Field(gt=0)
     width: float = Field(gt=0)
+    tare_weight: float = Field(ge=0, default=0.0)
     deck_height: float = Field(ge=0, default=0.0)
     max_stack_height: float = Field(gt=0)
     max_load: float = Field(gt=0)
     quantity: int = Field(ge=0, default=0)
 
+class LoadingAccess(BaseModel):
+    side: LoadingAccessSide = "x_max"
+    door_width: Optional[float] = Field(default=None, ge=0)
+    door_height: Optional[float] = Field(default=None, ge=0)
+    opening_start: Optional[float] = Field(default=None, ge=0)
+    opening_end: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_opening_range(self):
+        if (
+            self.opening_start is not None
+            and self.opening_end is not None
+            and self.opening_end < self.opening_start
+        ):
+            raise ValueError("opening_end must be greater than or equal to opening_start")
+        return self
 
 class Container(BaseModel):
     id: str
@@ -69,6 +87,7 @@ class Container(BaseModel):
     max_payload: float = Field(gt=0)
     door_width: Optional[float] = None
     door_height: Optional[float] = None
+    loading_accesses: list[LoadingAccess] = Field(default_factory=list)
     quantity: int = Field(ge=1, default=1)
 
 

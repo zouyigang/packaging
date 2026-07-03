@@ -10,6 +10,17 @@ const STACKING_TYPE_OPTIONS = [
   { value: 'top_only', label: '仅作上层货品', description: '只能放在其它货品上，上方不能再压货' },
 ]
 
+const LOADING_ACCESS_OPTIONS = [
+  { value: 'x_max', label: '后门', description: '从容器长度末端装货，适合常规集装箱和厢式车尾门' },
+  { value: 'x_min', label: '前门', description: '从容器长度起点装货，装箱顺序会从另一端开始' },
+  { value: 'y_min', label: '左侧门', description: '从宽度一侧装货，适合侧开门车厢或侧向月台' },
+  { value: 'y_max', label: '右侧门', description: '从另一侧宽度方向装货，可与左侧门组合使用' },
+  { value: 'z_max', label: '顶部吊装', description: '从顶部入口装货，适合开顶箱或吊装作业' },
+]
+
+const DEFAULT_LOADING_ACCESS = [
+  { side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null },
+]
 const itemFields = [
   { key: 'name', label: '名称', type: 'text' },
   { key: 'length', label: '长(cm)', type: 'number' },
@@ -27,6 +38,7 @@ const palletFields = [
   { key: 'name', label: '名称', type: 'text' },
   { key: 'length', label: '长(cm)', type: 'number' },
   { key: 'width', label: '宽(cm)', type: 'number' },
+  { key: 'tare_weight', label: '自重(kg)', type: 'number' },
   { key: 'deck_height', label: '台面高(cm)', type: 'number' },
   { key: 'max_stack_height', label: '限高(cm)', type: 'number' },
   { key: 'max_load', label: '限重(kg)', type: 'number' },
@@ -39,6 +51,7 @@ const containerFields = [
   { key: 'inner_width', label: '内宽(cm)', type: 'number' },
   { key: 'inner_height', label: '内高(cm)', type: 'number' },
   { key: 'max_payload', label: '载重(kg)', type: 'number' },
+  { key: 'loading_accesses', label: '装货入口', type: 'loading_accesses', options: LOADING_ACCESS_OPTIONS, defaultValue: DEFAULT_LOADING_ACCESS },
   { key: 'quantity', label: '数量', type: 'number', min: 1 },
 ]
 

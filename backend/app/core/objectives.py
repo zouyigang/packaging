@@ -29,6 +29,8 @@ class ScoreContext:
 
     inner_length: float
     inner_width: float
+    inner_height: float = 0.0
+    loading_access_sides: tuple[str, ...] = ("x_max",)
     unit_w: float = 0.0   # 当前待放件的质量（放置前由 packer 设好）
     total_w: float = 0.0  # 已放货物累计质量
     sum_wx: float = 0.0   # Σ 质量 × 中心x
@@ -139,16 +141,78 @@ class CenterOfGravity(Objective):
 
 
 class LoadingEfficiency(Objective):
-    """Loading efficiency: prefer lower layers and inside-to-outside placement."""
+    """Loading efficiency: adapt placement to the configured loading access."""
 
     name = "loading_efficiency"
 
+    def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
+        sides = ctx.loading_access_sides or ("x_max",)
+        single_side = sides[0] if len(sides) == 1 else None
+        length = ctx.inner_length or 1.0
+        width = ctx.inner_width or 1.0
+        height = ctx.inner_height or 1.0
+
+        def score(box: Box) -> tuple[float, ...]:
+            x, y, z, dx, dy, dz = box
+            area = dx * dy
+            cx = abs((x + dx / 2.0) - ctx.inner_length / 2.0) / length
+            cy = abs((y + dy / 2.0) - ctx.inner_width / 2.0) / width
+
+            if single_side in {"x_min", "x_max"}:
+                depth = _access_depth(box, single_side, ctx) / length
+                lateral = cy
+                return (z, -depth, lateral, x, y, -area)
+
+            if single_side in {"y_min", "y_max"}:
+                depth = _access_depth(box, single_side, ctx) / width
+                return (z, depth, cx, x, y, -area)
+
+            if single_side == "z_max":
+                top_depth = _access_depth(box, "z_max", ctx) / height
+                return (z, cx + cy, top_depth, -area, x, y)
+
+            nearest = min(_normalized_access_depth(box, side, ctx) for side in sides)
+            nearest_side = min(sides, key=lambda side: _normalized_access_depth(box, side, ctx))
+            return (z, nearest, _side_rank(nearest_side), cx + cy, x, y, -area)
+
+        return score
+
     def placement_score(self, box: Box) -> tuple[float, ...]:
-        x, y, z, dx, dy, dz = box
+        x, y, z, dx, dy, _dz = box
         return (z, x, y, -(dx * dy))
 
     def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
         return count_per_pallet >= 2 and load_efficiency >= 0.45
+
+
+def _access_depth(box: Box, side: str, ctx: ScoreContext) -> float:
+    x, y, z, dx, dy, dz = box
+    if side == "x_min":
+        return x
+    if side == "x_max":
+        return ctx.inner_length - (x + dx)
+    if side == "y_min":
+        return y
+    if side == "y_max":
+        return ctx.inner_width - (y + dy)
+    if side == "z_max":
+        return ctx.inner_height - (z + dz)
+    return 0.0
+
+
+def _normalized_access_depth(box: Box, side: str, ctx: ScoreContext) -> float:
+    if side in {"x_min", "x_max"}:
+        denom = ctx.inner_length or 1.0
+    elif side in {"y_min", "y_max"}:
+        denom = ctx.inner_width or 1.0
+    else:
+        denom = ctx.inner_height or 1.0
+    return _access_depth(box, side, ctx) / denom
+
+
+def _side_rank(side: str) -> int:
+    order = {"x_max": 0, "x_min": 1, "y_min": 2, "y_max": 3, "z_max": 4}
+    return order.get(side, 99)
 
 def _volume(c: Container) -> float:
     return c.inner_length * c.inner_width * c.inner_height

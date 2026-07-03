@@ -50,6 +50,13 @@ def test_limit_caps_count():
     assert load.count == 5
 
 
+def test_pallet_tare_weight_counts_in_total_weight():
+    pallet = _pallet().model_copy(update={"tare_weight": 15})
+    load = build_pallet_load(_item(), pallet, OBJ, instance_id="p#1", limit=5)
+    assert load.count == 5
+    assert load.total_weight == 65
+
+
 def test_max_load_caps_count():
     heavy = Item(id="h", length=50, width=50, height=50, weight=300, quantity=99)
     pallet = _pallet()  # max_load 1000 → 最多 3 件(900) ，第4件 1200>1000

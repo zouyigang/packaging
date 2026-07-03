@@ -27,7 +27,7 @@ class PalletLoad:
     footprint_l: float        # 块在 x 方向占用（= 托盘长）
     footprint_w: float        # 块在 y 方向占用（= 托盘宽）
     total_height: float       # 台面高 + 码放高
-    total_weight: float
+    total_weight: float       # cargo weight + pallet tare weight
     contents: list[Content] = field(default_factory=list)
 
     @property
@@ -65,13 +65,13 @@ def build_pallet_load(
     ep = ExtremePointSet()
     placed: list[PlacedItem] = []
     contents: list[Content] = []
-    weight = 0.0
+    cargo_weight = 0.0
     stack_height = 0.0
 
     while True:
         if limit is not None and len(contents) >= limit:
             break
-        if weight + item.weight > pallet.max_load + 1e-9:
+        if cargo_weight + item.weight > pallet.max_load + 1e-9:
             break
         cand = find_placement(
             item.length,
@@ -97,7 +97,7 @@ def build_pallet_load(
         ))
         ep.remove(cand.point)
         ep.add_from_placement(cand.box)
-        weight += item.weight
+        cargo_weight += item.weight
         stack_height = max(stack_height, z + dz)
 
     return PalletLoad(
@@ -105,7 +105,7 @@ def build_pallet_load(
         footprint_l=pallet.length,
         footprint_w=pallet.width,
         total_height=pallet.deck_height + stack_height,
-        total_weight=weight,
+        total_weight=cargo_weight + pallet.tare_weight,
         contents=contents,
     )
 

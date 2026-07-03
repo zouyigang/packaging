@@ -10,10 +10,10 @@ const sampleItems = [
   { id: 'box-B', name: '小箱B', length: 400, width: 300, height: 300, weight: 8, quantity: 12, allowed_rotations: allRotations, stackable: true, stacking_type: 'stackable', max_load_top: null, category: 'B' },
 ]
 const samplePallets = [
-  { id: 'plt', name: '标准托盘', length: 1200, width: 1000, deck_height: 150, max_stack_height: 1500, max_load: 1000, quantity: 4 },
+  { id: 'plt', name: '标准托盘', length: 1200, width: 1000, tare_weight: 0, deck_height: 150, max_stack_height: 1500, max_load: 1000, quantity: 4 },
 ]
 const sampleContainers = [
-  { id: 'cntr', name: '20GP', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, door_width: null, door_height: null, quantity: 2 },
+  { id: 'cntr', name: '20GP', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 2 },
 ]
 
 export const useStore = create((set, get) => ({
@@ -59,6 +59,6 @@ function blankRow(kind) {
   if (kind === 'items')
     return { id: nextId('item-'), name: '新货品', length: 300, width: 200, height: 200, weight: 1, quantity: 1, allowed_rotations: allRotations, stackable: true, stacking_type: 'stackable', max_load_top: null, category: '' }
   if (kind === 'pallets')
-    return { id: nextId('plt-'), name: '新托盘', length: 1200, width: 1000, deck_height: 150, max_stack_height: 1500, max_load: 1000, quantity: 1 }
-  return { id: nextId('cntr-'), name: '新容器', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, door_width: null, door_height: null, quantity: 1 }
+    return { id: nextId('plt-'), name: '新托盘', length: 1200, width: 1000, tare_weight: 0, deck_height: 150, max_stack_height: 1500, max_load: 1000, quantity: 1 }
+  return { id: nextId('cntr-'), name: '新容器', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 1 }
 }

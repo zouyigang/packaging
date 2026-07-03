@@ -1,5 +1,5 @@
 import { Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Switch, Tooltip } from 'antd'
-import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
+import { DeleteOutlined, EditOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 import { useStore } from '../store/useStore'
 
@@ -133,7 +133,7 @@ function ResourceRow({ row, fields, onEdit, onRemove }) {
 }
 
 function FieldEditor({ field, row, value, onChange }) {
-  const isWide = field.type === 'orientation_groups' || field.type === 'stacking_type_cards'
+  const isWide = field.type === 'orientation_groups' || field.type === 'stacking_type_cards' || field.type === 'loading_accesses'
   return (
     <div className={isWide ? 'modal-field-wide' : ''} style={{ minWidth: 0 }}>
       <span className="field-label">{field.label}</span>
@@ -182,6 +182,9 @@ function renderControl(field, row, value, onChange) {
   }
   if (field.type === 'orientation_groups') {
     return <OrientationEditor row={row} value={value} onChange={onChange} />
+  }
+  if (field.type === 'loading_accesses') {
+    return <LoadingAccessEditor field={field} row={row} value={value} onChange={onChange} />
   }
   const lockedTopLoad = field.key === 'max_load_top' && isTopLoadLocked(row?.stacking_type)
   return (
@@ -330,8 +333,17 @@ function OrientationEditor({ row, value, onChange }) {
         {ORIENTATION_GROUPS.map((group) => {
           const checked = group.rotations.every((rotation) => active.has(rotation))
           return (
-            <div key={group.key} className={`orientation-option ${checked ? 'is-active' : ''}`}>
-              <div className="orientation-option-head">
+            <div
+              key={group.key}
+              role="button"
+              tabIndex={0}
+              className={`orientation-option ${checked ? 'is-active' : ''}`}
+              onClick={() => toggleGroup(group, !checked)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') toggleGroup(group, !checked)
+              }}
+            >
+              <div className="orientation-option-head" onClick={(event) => event.stopPropagation()}>
                 <Checkbox
                   checked={checked}
                   disabled={group.fixed}
@@ -340,14 +352,9 @@ function OrientationEditor({ row, value, onChange }) {
                   {group.label}
                 </Checkbox>
               </div>
-              <button
-                type="button"
-                className="orientation-figure-button"
-                onClick={() => toggleGroup(group, !checked)}
-                disabled={group.fixed}
-              >
+              <div className="orientation-figure-button">
                 <OrientationFigure group={group} row={row} active={checked} />
-              </button>
+              </div>
               <div className="orientation-meta">
                 <span>底面：{group.base}</span>
                 <span>竖直：{group.vertical}</span>
@@ -407,6 +414,163 @@ function OrientationFigure({ group, row, active }) {
   )
 }
 
+function LoadingAccessEditor({ field, row, value, onChange }) {
+  const options = field.options || []
+  const accesses = normalizeAccesses(value, row, field.defaultValue)
+  const bySide = new Map(accesses.map((access) => [access.side, access]))
+
+  const commit = (next) => {
+    const clean = next.length > 0 ? next : [blankAccess('x_max')]
+    onChange(clean)
+  }
+
+  const toggleAccess = (side, checked) => {
+    if (checked) {
+      if (bySide.has(side)) return
+      commit([...accesses, blankAccess(side)])
+      return
+    }
+    commit(accesses.filter((access) => access.side !== side))
+  }
+
+  return (
+    <div className="access-editor">
+      <div className="access-grid">
+        {options.map((option) => {
+          const access = bySide.get(option.value)
+          const active = !!access
+          return (
+            <div
+              key={option.value}
+              role="button"
+              tabIndex={0}
+              className={`access-card ${active ? 'is-active' : ''}`}
+              onClick={() => toggleAccess(option.value, !active)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') toggleAccess(option.value, !active)
+              }}
+            >
+              <div className="access-card-head" onClick={(event) => event.stopPropagation()}>
+                <Checkbox checked={active} onChange={(event) => toggleAccess(option.value, event.target.checked)}>
+                  {option.label}
+                </Checkbox>
+              </div>
+              <div className="access-figure-button">
+                <AccessFigure side={option.value} active={active} />
+              </div>
+              <p>{option.description}</p>
+              {active && <AccessLockedFields row={row} side={option.value} />}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function AccessLockedFields({ row, side }) {
+  const defaults = accessDefaultValues(row, side)
+  return (
+    <div className="access-locked" onClick={(event) => event.stopPropagation()}>
+      <div className="access-premium-note">
+        <LockOutlined />
+        <span>高级会员可自定义门宽、门高和开口范围；当前默认整侧开口</span>
+      </div>
+      <div className="access-fields">
+        <label>
+          <span>门宽</span>
+          <InputNumber size="small" disabled value={defaults.door_width} />
+        </label>
+        <label>
+          <span>门高</span>
+          <InputNumber size="small" disabled value={defaults.door_height} />
+        </label>
+        <label>
+          <span>开口起点</span>
+          <InputNumber size="small" disabled value={defaults.opening_start} />
+        </label>
+        <label>
+          <span>开口终点</span>
+          <InputNumber size="small" disabled value={defaults.opening_end} />
+        </label>
+      </div>
+    </div>
+  )
+}
+
+function AccessFigure({ side, active }) {
+  const stroke = active ? '#176bff' : '#8da2c0'
+  const base = active ? '#dbeafe' : '#eef2f7'
+  const sideFill = active ? '#bfdbfe' : '#e4e9f1'
+  const topFill = active ? '#eff6ff' : '#f8fafc'
+  const door = active ? '#22c55e' : '#98a2b3'
+  const arrow = active ? '#176bff' : '#98a2b3'
+  const doorMarks = {
+    x_min: <line x1="42" y1="55" x2="42" y2="94" stroke={door} strokeWidth="6" strokeLinecap="round" />,
+    x_max: <polygon points="128,56 151,43 151,77 128,91" fill="rgba(34,197,94,0.20)" stroke={door} strokeWidth="3" />,
+    y_min: <rect x="55" y="62" width="58" height="28" rx="3" fill="rgba(34,197,94,0.18)" stroke={door} strokeWidth="3" />,
+    y_max: <line x1="74" y1="36" x2="150" y2="36" stroke={door} strokeWidth="6" strokeLinecap="round" />,
+    z_max: <polygon points="42,54 70,36 154,36 126,54" fill="rgba(34,197,94,0.20)" stroke={door} strokeWidth="3" />,
+  }
+  const arrows = {
+    x_min: <AccessArrow points="23,76 43,76" tip="43,76 35,70 35,82" color={arrow} />,
+    x_max: <AccessArrow points="169,64 149,64" tip="149,64 157,58 157,70" color={arrow} />,
+    y_min: <AccessArrow points="84,112 84,91" tip="84,91 78,99 90,99" color={arrow} />,
+    y_max: <AccessArrow points="112,16 112,37" tip="112,37 106,29 118,29" color={arrow} />,
+    z_max: <AccessArrow points="98,11 98,38" tip="98,38 91,28 105,28" color={arrow} />,
+  }
+  return (
+    <svg viewBox="0 0 190 126" role="img" aria-hidden="true">
+      <polygon points="42,54 126,54 126,96 42,96" fill={base} stroke={stroke} />
+      <polygon points="126,54 154,36 154,78 126,96" fill={sideFill} stroke={stroke} />
+      <polygon points="42,54 70,36 154,36 126,54" fill={topFill} stroke={stroke} />
+      <line x1="70" y1="36" x2="70" y2="78" stroke="#cbd5e1" />
+      <line x1="70" y1="78" x2="42" y2="96" stroke="#cbd5e1" />
+      {doorMarks[side]}
+      {arrows[side]}
+    </svg>
+  )
+}
+
+function AccessArrow({ points, tip, color }) {
+  const [x1, y1, x2, y2] = points.split(/[ ,]+/).map(Number)
+  return (
+    <g stroke={color} fill={color} strokeWidth="3" strokeLinecap="round">
+      <line x1={x1} y1={y1} x2={x2} y2={y2} />
+      <path d={`M${tip.split(' ').join(' L')} Z`} stroke="none" />
+    </g>
+  )
+}
+
+function blankAccess(side = 'x_max') {
+  return { side, door_width: null, door_height: null, opening_start: null, opening_end: null }
+}
+
+function accessDefaultValues(row, side) {
+  const length = getPositiveDimension(row, 'inner_length')
+  const width = getPositiveDimension(row, 'inner_width')
+  const height = getPositiveDimension(row, 'inner_height')
+  if (side === 'y_min' || side === 'y_max') {
+    return { door_width: length, door_height: height, opening_start: 0, opening_end: length }
+  }
+  if (side === 'z_max') {
+    return { door_width: length, door_height: width, opening_start: 0, opening_end: length }
+  }
+  return { door_width: width, door_height: height, opening_start: 0, opening_end: width }
+}
+
+function normalizeAccesses(value, row, defaultValue) {
+  if (Array.isArray(value) && value.length > 0) {
+    return value.map((access) => ({ ...blankAccess(access.side || 'x_max'), ...access }))
+  }
+  if (row?.door_width != null || row?.door_height != null) {
+    return [{ ...blankAccess('x_max'), door_width: row.door_width ?? null, door_height: row.door_height ?? null }]
+  }
+  if (Array.isArray(defaultValue) && defaultValue.length > 0) {
+    return defaultValue.map((access) => ({ ...blankAccess(access.side || 'x_max'), ...access }))
+  }
+  return [blankAccess('x_max')]
+}
 function getPositiveDimension(row, key) {
   const value = Number(row?.[key])
   return Number.isFinite(value) && value > 0 ? value : 1
@@ -430,12 +594,13 @@ function getSummary(row, fields) {
 }
 
 function getChips(row, fields) {
-  const keys = ['quantity', 'weight', 'stacking_type', 'allowed_rotations', 'max_payload', 'max_load', 'max_stack_height', 'deck_height']
+  const keys = ['quantity', 'weight', 'tare_weight', 'stacking_type', 'allowed_rotations', 'max_payload', 'loading_accesses', 'max_load', 'max_stack_height', 'deck_height']
   return keys
     .map((key) => {
       const field = fields.find((f) => f.key === key)
       const value = row[key]
       if (!field || value === undefined || value === null || value === '') return null
+      if (field.type === 'loading_accesses') return accessChip(value, field, row)
       if (field.type === 'orientation_groups') return orientationChip(value)
       if (field.type === 'stacking_type_cards') return stackingChip(value, field)
       const option = field.options?.find((item) => item.value === value)
@@ -448,6 +613,21 @@ function getChips(row, fields) {
     .slice(0, 4)
 }
 
+function accessChip(value, field, row) {
+  const accesses = normalizeAccesses(value, row, field.defaultValue)
+  const options = field.options || []
+  const labels = accesses.map((access) => (
+    options.find((option) => option.value === access.side)?.label || access.side
+  ))
+  return {
+    text: `${field.label}: ${labels.join('+')}`,
+    tooltip: accesses.map((access) => {
+      const label = options.find((option) => option.value === access.side)?.label || access.side
+      const defaults = accessDefaultValues(row, access.side)
+      return `${label}: 默认整侧开口 ${defaults.door_width} x ${defaults.door_height}`
+    }).join('\n'),
+  }
+}
 function stackingChip(value, field) {
   const option = field.options?.find((item) => item.value === value)
   return { text: `${field.label}: ${option?.label ?? value}` }

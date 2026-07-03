@@ -78,3 +78,14 @@ def test_no_pallets_behaves_like_direct():
     placements = [p for c in sol.containers for p in c.placements]
     assert len(placements) == 8
     assert all(p.pallet_id is None for p in placements)
+
+def test_pallet_tare_weight_counts_against_container_payload():
+    req = SolveRequest(
+        items=[_item(16)],
+        pallets=[_pallet(1).model_copy(update={"tare_weight": 50})],
+        containers=[Container(id="c", inner_length=220, inner_width=220, inner_height=220, max_payload=200, quantity=1)],
+        objective="stability",
+    )
+    sol = solve(req)
+    assert sol.containers == []
+    assert sol.unpacked == ["a"] * 16

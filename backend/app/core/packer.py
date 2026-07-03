@@ -16,6 +16,7 @@ from ..models.schemas import (
     Container,
     Item,
     LoadedContainer,
+    LoadingAccess,
     Placement,
     Solution,
     SolveRequest,
@@ -212,7 +213,8 @@ def _pack_placeables_into_container(
     used_weight = 0.0
 
     # 评分上下文（含累计重心信息），供重心居中等目标使用；默认目标忽略它。
-    ctx = ScoreContext(inner_length=container.inner_length, inner_width=container.inner_width)
+    ctx = ScoreContext(inner_length=container.inner_length, inner_width=container.inner_width, inner_height=container.inner_height)
+    ctx.loading_access_sides = tuple(access.side for access in _effective_loading_accesses(container))
     scorer = objective.make_scorer(ctx)
 
     for pl in placeables:
@@ -327,13 +329,14 @@ def _pack_placeables_into_container(
     loaded.weight_utilization = (
         used_weight / container.max_payload if container.max_payload else 0.0
     )
-    _resequence_inside_to_outside(loaded, placement_boxes)
+    _resequence_inside_to_outside(loaded, placement_boxes, container)
     return loaded, leftover
 
 
 def _resequence_inside_to_outside(
     loaded: LoadedContainer,
     placement_boxes: list[tuple[Placement, tuple[float, float, float, float, float, float]]],
+    container: Container,
 ) -> None:
     """Assign loading seq from container inside to door while honoring support deps."""
     records = list(placement_boxes)
@@ -360,7 +363,7 @@ def _resequence_inside_to_outside(
         ready = [i for i in remaining if deps[i].issubset(emitted)]
         if not ready:
             ready = list(remaining)
-        ready.sort(key=lambda i: _loading_priority(records[i]))
+        ready.sort(key=lambda i: _loading_priority(records[i], container))
         chosen = ready[0]
         remaining.remove(chosen)
         emitted.append(chosen)
@@ -371,10 +374,80 @@ def _resequence_inside_to_outside(
     loaded.placements = ordered
 
 
-def _loading_priority(record: tuple[Placement, tuple[float, float, float, float, float, float]]) -> tuple[float, float, float, int]:
+def _loading_priority(
+    record: tuple[Placement, tuple[float, float, float, float, float, float]],
+    container: Container,
+) -> tuple[float, float, float, float, float, int]:
     placement, box = record
-    _x, _y, z, _dx, _dy, _dz = box
-    return (placement.x, z, placement.y, placement.seq)
+    x, y, z, dx, dy, dz = box
+    accesses = _effective_loading_accesses(container)
+    sides = tuple(access.side for access in accesses)
+    single_side = sides[0] if len(sides) == 1 else None
+
+    if single_side in {"x_min", "x_max"}:
+        return (-_access_depth(box, accesses[0], container), z, y, x, 0.0, placement.seq)
+
+    if single_side in {"y_min", "y_max"}:
+        center_x = abs((x + dx / 2.0) - container.inner_length / 2.0)
+        return (_access_depth(box, accesses[0], container), z, center_x, x, y, placement.seq)
+
+    if single_side == "z_max":
+        center = (
+            abs((x + dx / 2.0) - container.inner_length / 2.0)
+            + abs((y + dy / 2.0) - container.inner_width / 2.0)
+        )
+        return (z, center, -(dx * dy), x, y, placement.seq)
+
+    nearest = min(accesses, key=lambda access: _access_depth(box, access, container))
+    partition = _access_rank(nearest.side)
+    return (partition, _access_depth(box, nearest, container), z, x, y, placement.seq)
+
+
+def _effective_loading_accesses(container: Container) -> list[LoadingAccess]:
+    if container.loading_accesses:
+        return container.loading_accesses
+    if container.door_width is not None or container.door_height is not None:
+        return [
+            LoadingAccess(
+                side="x_max",
+                door_width=container.door_width,
+                door_height=container.door_height,
+            )
+        ]
+    return [LoadingAccess(side="x_max")]
+
+
+
+def _access_rank(side: str) -> int:
+    order = {"x_max": 0, "x_min": 1, "y_min": 2, "y_max": 3, "z_max": 4}
+    return order.get(side, 99)
+
+def _loading_depth(
+    box: tuple[float, float, float, float, float, float],
+    container: Container,
+) -> float:
+    depths = [_access_depth(box, access, container) for access in _effective_loading_accesses(container)]
+    return min(depths) if depths else 0.0
+
+
+def _access_depth(
+    box: tuple[float, float, float, float, float, float],
+    access: LoadingAccess,
+    container: Container,
+) -> float:
+    x, y, z, dx, dy, dz = box
+    if access.side == "x_min":
+        return x
+    if access.side == "x_max":
+        return container.inner_length - (x + dx)
+    if access.side == "y_min":
+        return y
+    if access.side == "y_max":
+        return container.inner_width - (y + dy)
+    if access.side == "z_max":
+        return container.inner_height - (z + dz)
+    return 0.0
+
 
 def _expand_containers(request: SolveRequest, objective: Objective) -> list[Container]:
     """按目标排定容器开箱优先级，并展开各容器类型的可用数量。"""
