@@ -120,6 +120,8 @@ class CenterOfGravity(Objective):
     def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
         cx = ctx.inner_length / 2.0
         cy = ctx.inner_width / 2.0
+        length = ctx.inner_length or 1.0
+        width = ctx.inner_width or 1.0
 
         def score(box: Box) -> tuple[float, ...]:
             x, y, z, dx, dy, _dz = box
@@ -129,21 +131,48 @@ class CenterOfGravity(Objective):
             nw = ctx.total_w + m  # m>0 恒成立，nw>0
             gx = (ctx.sum_wx + m * bx) / nw
             gy = (ctx.sum_wy + m * by) / nw
-            offset = abs(gx - cx) + abs(gy - cy)
-            return (offset, z, x, y)
+            norm_x = abs(gx - cx) / length
+            norm_y = abs(gy - cy) / width
+            return (z, max(norm_x, norm_y), norm_x + norm_y, x, y)
 
         return score
 
+
+class LoadingEfficiency(Objective):
+    """Loading efficiency: prefer lower layers and inside-to-outside placement."""
+
+    name = "loading_efficiency"
+
+    def placement_score(self, box: Box) -> tuple[float, ...]:
+        x, y, z, dx, dy, dz = box
+        return (z, x, y, -(dx * dy))
+
+    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
+        return count_per_pallet >= 2 and load_efficiency >= 0.45
 
 def _volume(c: Container) -> float:
     return c.inner_length * c.inner_width * c.inner_height
 
 
-_REGISTRY: dict[str, Objective] = {
-    o.name: o
-    for o in (MaxUtilization(), MinContainers(), Stability(), Balanced(), CenterOfGravity())
-}
+transport_cost = MaxUtilization()
+min_containers = MinContainers()
+load_stability = Stability()
+advanced_score = Balanced()
+weight_balance = CenterOfGravity()
+loading_efficiency = LoadingEfficiency()
 
+_REGISTRY: dict[str, Objective] = {
+    "transport_cost": transport_cost,
+    "max_utilization": transport_cost,
+    "min_containers": min_containers,
+    "load_stability": load_stability,
+    "stability": load_stability,
+    "advanced_score": advanced_score,
+    "balanced": advanced_score,
+    "weight_balance": weight_balance,
+    "center_of_gravity": weight_balance,
+    "loading_efficiency": loading_efficiency,
+}
 
 def get_objective(name: str) -> Objective:
     try:

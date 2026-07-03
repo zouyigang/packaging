@@ -1,60 +1,470 @@
-import { Table, InputNumber, Input, Switch, Button, Space } from 'antd'
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
+import { Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Switch, Tooltip } from 'antd'
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
+import { useState } from 'react'
 import { useStore } from '../store/useStore'
 
-// 通用可编辑表格：fields 描述列；id 只读（新增时自动生成），其余单元格就地编辑。
+const ORIENTATION_ORDER = ['LWH', 'WLH', 'LHW', 'HLW', 'WHL', 'HWL']
+const TOP_LOAD_LOCKED_STACKING_TYPES = new Set(['not_stackable', 'top_only'])
+const ORIENTATION_GROUPS = [
+  {
+    key: 'default_base',
+    label: '默认底面朝下',
+    description: '高作为竖直方向，底面为长 × 宽',
+    base: '长 × 宽',
+    vertical: '高',
+    rotations: ['LWH', 'WLH'],
+    dimKeys: ['length', 'width', 'height'],
+    fixed: true,
+  },
+  {
+    key: 'length_height_base',
+    label: '长高面朝下',
+    description: '宽作为竖直方向，底面为长 × 高',
+    base: '长 × 高',
+    vertical: '宽',
+    rotations: ['LHW', 'HLW'],
+    dimKeys: ['length', 'height', 'width'],
+  },
+  {
+    key: 'width_height_base',
+    label: '宽高面朝下',
+    description: '长作为竖直方向，底面为宽 × 高',
+    base: '宽 × 高',
+    vertical: '长',
+    rotations: ['WHL', 'HWL'],
+    dimKeys: ['width', 'height', 'length'],
+  },
+]
+
 export default function EditableTable({ kind, title, fields }) {
   const rows = useStore((s) => s[kind])
   const updateRow = useStore((s) => s.updateRow)
   const removeRow = useStore((s) => s.removeRow)
   const addRow = useStore((s) => s.addRow)
+  const [editingId, setEditingId] = useState(null)
 
-  const columns = fields.map((f) => ({
-    title: f.label,
-    dataIndex: f.key,
-    width: f.width,
-    render: (value, row) => {
-      if (f.type === 'text')
-        return <Input size="small" value={value ?? ''} onChange={(e) => updateRow(kind, row.id, { [f.key]: e.target.value })} />
-      if (f.type === 'bool')
-        return <Switch size="small" checked={!!value} onChange={(v) => updateRow(kind, row.id, { [f.key]: v })} />
-      // number（可空：max_load_top / door_* 允许 null 表示未指定）
-      return (
-        <InputNumber
-          size="small"
-          style={{ width: '100%' }}
-          value={value}
-          min={f.min ?? 0}
-          onChange={(v) => updateRow(kind, row.id, { [f.key]: v })}
-        />
-      )
-    },
-  }))
-
-  columns.unshift({ title: 'id', dataIndex: 'id', width: 90, fixed: 'left' })
-  columns.push({
-    title: '',
-    width: 40,
-    fixed: 'right',
-    render: (_, row) => (
-      <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeRow(kind, row.id)} />
-    ),
-  })
+  const editingRow = rows.find((row) => row.id === editingId) || null
 
   return (
-    <div style={{ marginBottom: 16 }}>
-      <Space style={{ marginBottom: 8 }}>
+    <section className="resource-section">
+      <div className="resource-section-head">
         <strong>{title}</strong>
+        <span className="resource-count">{rows.length}</span>
+        <div style={{ flex: 1 }} />
         <Button size="small" icon={<PlusOutlined />} onClick={() => addRow(kind)}>新增</Button>
-      </Space>
-      <Table
-        rowKey="id"
-        size="small"
-        columns={columns}
-        dataSource={rows}
-        pagination={false}
-        scroll={{ x: 'max-content' }}
-      />
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="resource-empty">
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
+        </div>
+      ) : (
+        rows.map((row) => (
+          <ResourceRow
+            key={row.id}
+            row={row}
+            fields={fields}
+            onEdit={() => setEditingId(row.id)}
+            onRemove={() => removeRow(kind, row.id)}
+          />
+        ))
+      )}
+
+      <Modal
+        title={editingRow ? `${title} · ${editingRow.id}` : title}
+        open={!!editingRow}
+        onCancel={() => setEditingId(null)}
+        footer={null}
+        width={900}
+        destroyOnClose
+      >
+        {editingRow && (
+          <div className="modal-field-grid">
+            {fields.map((field) => (
+              <FieldEditor
+                key={field.key}
+                field={field}
+                row={editingRow}
+                value={editingRow[field.key]}
+                onChange={(value) => updateRow(kind, editingRow.id, makePatch(field, value))}
+              />
+            ))}
+          </div>
+        )}
+      </Modal>
+    </section>
+  )
+}
+
+function ResourceRow({ row, fields, onEdit, onRemove }) {
+  const title = row.name || row.id
+  const summary = getSummary(row, fields)
+  const chips = getChips(row, fields)
+
+  return (
+    <div className="resource-row">
+      <button type="button" onClick={onEdit} className="resource-row-main">
+        <div className="resource-row-title">
+          <strong>{title}</strong>
+          <span className="resource-id">{row.id}</span>
+        </div>
+        <div className="resource-summary">{summary || '-'}</div>
+        {chips.length > 0 && (
+          <Space size={6} wrap style={{ marginTop: 6 }}>
+            {chips.map((chip) => {
+              const node = <span className="resource-chip">{chip.text}</span>
+              return chip.tooltip ? (
+                <Tooltip key={chip.text} title={chip.tooltip}>{node}</Tooltip>
+              ) : (
+                <span key={chip.text}>{node}</span>
+              )
+            })}
+          </Space>
+        )}
+      </button>
+      <Tooltip title="编辑">
+        <Button size="small" type="text" icon={<EditOutlined />} onClick={onEdit} />
+      </Tooltip>
+      <Tooltip title="删除">
+        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={onRemove} />
+      </Tooltip>
     </div>
   )
+}
+
+function FieldEditor({ field, row, value, onChange }) {
+  const isWide = field.type === 'orientation_groups' || field.type === 'stacking_type_cards'
+  return (
+    <div className={isWide ? 'modal-field-wide' : ''} style={{ minWidth: 0 }}>
+      <span className="field-label">{field.label}</span>
+      {renderControl(field, row, value, onChange)}
+    </div>
+  )
+}
+
+function makePatch(field, value) {
+  if (field.key === 'stacking_type' && isTopLoadLocked(value)) {
+    return { [field.key]: value, max_load_top: 0 }
+  }
+  return { [field.key]: value }
+}
+
+function renderControl(field, row, value, onChange) {
+  if (field.type === 'text') {
+    return <Input value={value ?? ''} onChange={(e) => onChange(e.target.value)} />
+  }
+  if (field.type === 'bool') {
+    return <Switch checked={!!value} onChange={onChange} />
+  }
+  if (field.type === 'select') {
+    return (
+      <Select
+        value={value ?? field.defaultValue}
+        options={field.options || []}
+        onChange={onChange}
+        style={{ width: '100%' }}
+        optionRender={(option) => (
+          <Tooltip title={option.data.description} placement="right">
+            <span>{option.data.label}</span>
+          </Tooltip>
+        )}
+      />
+    )
+  }
+  if (field.type === 'stacking_type_cards') {
+    return (
+      <StackingTypeEditor
+        value={value ?? field.defaultValue}
+        options={field.options || []}
+        onChange={onChange}
+      />
+    )
+  }
+  if (field.type === 'orientation_groups') {
+    return <OrientationEditor row={row} value={value} onChange={onChange} />
+  }
+  const lockedTopLoad = field.key === 'max_load_top' && isTopLoadLocked(row?.stacking_type)
+  return (
+    <InputNumber
+      style={{ width: '100%' }}
+      value={lockedTopLoad ? 0 : value}
+      min={field.min ?? 0}
+      disabled={lockedTopLoad}
+      onChange={onChange}
+    />
+  )
+}
+
+function isTopLoadLocked(stackingType) {
+  return TOP_LOAD_LOCKED_STACKING_TYPES.has(stackingType)
+}
+
+function StackingTypeEditor({ value, options, onChange }) {
+  return (
+    <div className="stacking-grid">
+      {options.map((option) => {
+        const active = value === option.value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            className={`stacking-card ${active ? 'is-active' : ''}`}
+            aria-pressed={active}
+            onClick={() => onChange(option.value)}
+          >
+            <div className="stacking-card-head">
+              <span className="stacking-radio" />
+              <strong>{option.label}</strong>
+            </div>
+            <StackingFigure type={option.value} active={active} />
+            <p>{option.description}</p>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function StackingFigure({ type, active }) {
+  const primary = active ? '#176bff' : '#8da2c0'
+  const primaryFill = active ? '#bfdbfe' : '#e4e9f1'
+  const lowerFill = active ? '#d9e7ff' : '#eef2f7'
+  const upperFill = active ? '#bbf7d0' : '#e5e7eb'
+  const mutedStroke = active ? '#5b7fb7' : '#98a2b3'
+
+  return (
+    <svg className="stacking-figure" viewBox="0 0 160 120" role="img" aria-hidden="true">
+      <line x1="20" y1="104" x2="140" y2="104" stroke="#cbd5e1" strokeWidth="2" />
+      {type === 'not_stackable' && (
+        <>
+          <Block x={58} y={70} fill={primaryFill} stroke={primary} label="本品" />
+          <StopMark x={80} y={38} />
+          <StopMark x={80} y={98} />
+        </>
+      )}
+      {type === 'same_item_only' && (
+        <>
+          <Block x={58} y={76} fill={primaryFill} stroke={primary} label="同" />
+          <Block x={58} y={52} fill={primaryFill} stroke={primary} label="同" />
+          <Block x={58} y={28} fill={primaryFill} stroke={primary} label="同" />
+        </>
+      )}
+      {type === 'stackable' && (
+        <>
+          <Block x={58} y={76} fill={lowerFill} stroke={mutedStroke} label="下" />
+          <Block x={58} y={52} fill={primaryFill} stroke={primary} label="本" />
+          <Block x={58} y={28} fill={upperFill} stroke="#22c55e" label="上" />
+        </>
+      )}
+      {type === 'support_only' && (
+        <>
+          <Block x={58} y={76} fill={primaryFill} stroke={primary} label="本" />
+          <Block x={58} y={52} fill={upperFill} stroke="#22c55e" label="上" />
+          <Arrow x={120} y1={84} y2={46} active={active} />
+        </>
+      )}
+      {type === 'top_only' && (
+        <>
+          <Block x={58} y={76} fill={lowerFill} stroke={mutedStroke} label="下" />
+          <Block x={58} y={52} fill={primaryFill} stroke={primary} label="本" />
+          <StopMark x={80} y={30} />
+        </>
+      )}
+    </svg>
+  )
+}
+
+function Block({ x, y, fill, stroke, label }) {
+  return (
+    <g>
+      <rect x={x} y={y} width="44" height="22" rx="3" fill={fill} stroke={stroke} />
+      <text x={x + 22} y={y + 15} textAnchor="middle">{label}</text>
+    </g>
+  )
+}
+
+function StopMark({ x, y }) {
+  return (
+    <g stroke="#ef4444" strokeWidth="3" strokeLinecap="round">
+      <line x1={x - 8} y1={y - 8} x2={x + 8} y2={y + 8} />
+      <line x1={x + 8} y1={y - 8} x2={x - 8} y2={y + 8} />
+    </g>
+  )
+}
+
+function Arrow({ x, y1, y2, active }) {
+  const color = active ? '#176bff' : '#98a2b3'
+  return (
+    <g stroke={color} fill={color} strokeWidth="3" strokeLinecap="round">
+      <line x1={x} y1={y1} x2={x} y2={y2} />
+      <path d={`M${x} ${y2 - 8} L${x - 7} ${y2 + 4} L${x + 7} ${y2 + 4} Z`} stroke="none" />
+    </g>
+  )
+}
+
+function OrientationEditor({ row, value, onChange }) {
+  const rotations = normalizeRotations(value)
+  const active = new Set(rotations)
+
+  const setAll = () => onChange(ORIENTATION_ORDER)
+  const setDefaultOnly = () => onChange(ORIENTATION_GROUPS[0].rotations)
+
+  const toggleGroup = (group, checked) => {
+    if (group.fixed) return
+    const next = new Set(rotations)
+    for (const rotation of group.rotations) {
+      if (checked) next.add(rotation)
+      else next.delete(rotation)
+    }
+    for (const rotation of ORIENTATION_GROUPS[0].rotations) next.add(rotation)
+    onChange(ORIENTATION_ORDER.filter((rotation) => next.has(rotation)))
+  }
+
+  return (
+    <div className="orientation-editor">
+      <div className="orientation-actions">
+        <Button size="small" onClick={setAll}>全部允许</Button>
+        <Button size="small" onClick={setDefaultOnly}>仅默认姿态</Button>
+      </div>
+      <div className="orientation-grid">
+        {ORIENTATION_GROUPS.map((group) => {
+          const checked = group.rotations.every((rotation) => active.has(rotation))
+          return (
+            <div key={group.key} className={`orientation-option ${checked ? 'is-active' : ''}`}>
+              <div className="orientation-option-head">
+                <Checkbox
+                  checked={checked}
+                  disabled={group.fixed}
+                  onChange={(event) => toggleGroup(group, event.target.checked)}
+                >
+                  {group.label}
+                </Checkbox>
+              </div>
+              <button
+                type="button"
+                className="orientation-figure-button"
+                onClick={() => toggleGroup(group, !checked)}
+                disabled={group.fixed}
+              >
+                <OrientationFigure group={group} row={row} active={checked} />
+              </button>
+              <div className="orientation-meta">
+                <span>底面：{group.base}</span>
+                <span>竖直：{group.vertical}</span>
+              </div>
+              <p>{group.description}</p>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function OrientationFigure({ group, row, active }) {
+  const [baseXValue, baseYValue, verticalValue] = group.dimKeys.map((key) => getPositiveDimension(row, key))
+  const maxDimension = Math.max(
+    getPositiveDimension(row, 'length'),
+    getPositiveDimension(row, 'width'),
+    getPositiveDimension(row, 'height'),
+    1,
+  )
+  const scale = 62 / maxDimension
+  const baseX = Math.max(18, baseXValue * scale)
+  const depth = Math.max(14, baseYValue * scale * 0.62)
+  const vertical = Math.max(18, verticalValue * scale)
+  const ox = 42
+  const oy = 94
+  const sx = depth * 0.82
+  const sy = -depth * 0.45
+
+  const a = [ox, oy]
+  const b = [ox + baseX, oy]
+  const c = [ox + baseX + sx, oy + sy]
+  const d = [ox + sx, oy + sy]
+  const at = [a[0], a[1] - vertical]
+  const bt = [b[0], b[1] - vertical]
+  const ct = [c[0], c[1] - vertical]
+  const dt = [d[0], d[1] - vertical]
+
+  const points = (...items) => items.map((point) => point.join(',')).join(' ')
+  const front = points(a, b, bt, at)
+  const side = points(b, c, ct, bt)
+  const top = points(at, bt, ct, dt)
+  const guideX = Math.min(172, c[0] + 16)
+  const guideTop = Math.min(at[1], bt[1], ct[1], dt[1])
+
+  return (
+    <svg viewBox="0 0 190 126" role="img" aria-label={group.description}>
+      <polygon points={front} fill={active ? '#bfdbfe' : '#e4e9f1'} stroke="#8da2c0" />
+      <polygon points={side} fill={active ? '#93c5fd' : '#d5dce7'} stroke="#8da2c0" />
+      <polygon points={top} fill={active ? '#dbeafe' : '#eef2f7'} stroke="#8da2c0" />
+      <line x1={guideX} y1={oy} x2={guideX} y2={guideTop} stroke={active ? '#176bff' : '#98a2b3'} strokeWidth="3" />
+      <path d={`M${guideX} ${guideTop - 8} L${guideX - 7} ${guideTop + 5} L${guideX + 7} ${guideTop + 5} Z`} fill={active ? '#176bff' : '#98a2b3'} />
+      <text x={ox + baseX / 2 + sx * 0.5} y="118" textAnchor="middle">{group.base}</text>
+      <text x={Math.max(126, guideX - 18)} y={Math.max(16, guideTop + 10)} textAnchor="middle">{group.vertical}</text>
+    </svg>
+  )
+}
+
+function getPositiveDimension(row, key) {
+  const value = Number(row?.[key])
+  return Number.isFinite(value) && value > 0 ? value : 1
+}
+
+function normalizeRotations(value) {
+  if (!Array.isArray(value) || value.length === 0) return ORIENTATION_ORDER
+  const next = new Set(value)
+  for (const rotation of ORIENTATION_GROUPS[0].rotations) next.add(rotation)
+  return ORIENTATION_ORDER.filter((rotation) => next.has(rotation))
+}
+
+function getSummary(row, fields) {
+  const length = row.length ?? row.inner_length
+  const width = row.width ?? row.inner_width
+  const height = row.height ?? row.inner_height
+  if (length && width && height) return `${length} x ${width} x ${height} cm`
+  if (length && width) return `${length} x ${width} cm`
+  const nameField = fields.find((field) => field.key === 'name')
+  return nameField ? row[nameField.key] : ''
+}
+
+function getChips(row, fields) {
+  const keys = ['quantity', 'weight', 'stacking_type', 'allowed_rotations', 'max_payload', 'max_load', 'max_stack_height', 'deck_height']
+  return keys
+    .map((key) => {
+      const field = fields.find((f) => f.key === key)
+      const value = row[key]
+      if (!field || value === undefined || value === null || value === '') return null
+      if (field.type === 'orientation_groups') return orientationChip(value)
+      if (field.type === 'stacking_type_cards') return stackingChip(value, field)
+      const option = field.options?.find((item) => item.value === value)
+      return {
+        text: `${field.label}: ${option?.label ?? value}`,
+        tooltip: option?.description,
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 4)
+}
+
+function stackingChip(value, field) {
+  const option = field.options?.find((item) => item.value === value)
+  return { text: `${field.label}: ${option?.label ?? value}` }
+}
+
+function orientationChip(value) {
+  const rotations = normalizeRotations(value)
+  const activeGroups = ORIENTATION_GROUPS.filter((group) =>
+    group.rotations.every((rotation) => rotations.includes(rotation)),
+  )
+  const text = activeGroups.length === ORIENTATION_GROUPS.length
+    ? '姿态: 全部允许'
+    : activeGroups.length === 1
+      ? '姿态: 仅默认'
+      : `姿态: ${activeGroups.length} 类`
+  return {
+    text,
+    tooltip: activeGroups.map((group) => `${group.label}: ${group.description}`).join('\n'),
+  }
 }

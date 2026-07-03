@@ -18,7 +18,8 @@ from typing import Optional
 from .geometry import Box
 
 EPS = 1e-6
-DEFAULT_SUPPORT_RATIO = 0.6  # 底面至少 60% 被支撑才稳，可调
+DEFAULT_SUPPORT_RATIO = 1.0  # Require full base support for non-ground loads.
+DEFAULT_COG_MAX_OFFSET_RATIO = 0.25  # Max normalized COG offset per horizontal axis.
 
 
 @dataclass
@@ -29,6 +30,7 @@ class PlacedItem:
     weight: float
     max_load_top: Optional[float]  # None=无限制, 0=易碎
     item_id: str
+    stacking_type: str = "stackable"
     carried: float = 0.0  # 已压在其顶部的累计重量
 
 
@@ -82,6 +84,81 @@ def check_stack_load(box: Box, weight: float, placed: list[PlacedItem]) -> bool:
             return False
     return True
 
+
+def check_stacking_type(
+    box: Box,
+    item_id: str,
+    stacking_type: str,
+    placed: list[PlacedItem],
+) -> bool:
+    """Validate vertical stacking compatibility with direct supporters."""
+    sups = supporters(box, placed)
+    if box[2] <= EPS:
+        return stacking_type != "top_only"
+    if not sups:
+        return False
+    for supporter, _area in sups:
+        if not _can_be_supported_by(stacking_type, item_id, supporter):
+            return False
+        if not _can_support(supporter.stacking_type, supporter.item_id, item_id):
+            return False
+    return True
+
+
+def _can_be_supported_by(stacking_type: str, item_id: str, supporter: PlacedItem) -> bool:
+    if stacking_type == "not_stackable":
+        return False
+    if stacking_type == "same_item_only":
+        return supporter.item_id == item_id
+    if stacking_type == "support_only":
+        return False
+    return True
+
+
+def _can_support(stacking_type: str, supporter_id: str, item_id: str) -> bool:
+    if stacking_type == "not_stackable":
+        return False
+    if stacking_type == "same_item_only":
+        return supporter_id == item_id
+    if stacking_type == "top_only":
+        return False
+    return True
+
+
+def check_heavy_low(box: Box, weight: float, placed: list[PlacedItem]) -> bool:
+    """Reject placing a heavier item directly on top of lighter support items."""
+    if box[2] <= EPS:
+        return True
+    return all(weight <= pi.weight + EPS for pi, _area in supporters(box, placed))
+
+
+def check_cog_within_limits(
+    box: Box,
+    weight: float,
+    placed: list[PlacedItem],
+    inner_length: float,
+    inner_width: float,
+    max_offset_ratio: float = DEFAULT_COG_MAX_OFFSET_RATIO,
+) -> bool:
+    """Keep the running horizontal center of gravity within container limits."""
+    x, y, _z, dx, dy, dz = box
+    mass = weight if weight > 0 else dx * dy * dz
+    total_w = mass
+    sum_wx = mass * (x + dx / 2.0)
+    sum_wy = mass * (y + dy / 2.0)
+    for pi in placed:
+        px, py, _pz, pdx, pdy, pdz = pi.box
+        pmass = pi.weight if pi.weight > 0 else pdx * pdy * pdz
+        total_w += pmass
+        sum_wx += pmass * (px + pdx / 2.0)
+        sum_wy += pmass * (py + pdy / 2.0)
+    if total_w <= EPS:
+        return True
+    gx = sum_wx / total_w
+    gy = sum_wy / total_w
+    norm_x = abs(gx - inner_length / 2.0) / inner_length
+    norm_y = abs(gy - inner_width / 2.0) / inner_width
+    return norm_x <= max_offset_ratio + EPS and norm_y <= max_offset_ratio + EPS
 
 def commit_stack_load(box: Box, weight: float, placed: list[PlacedItem]) -> None:
     """放置已确认后，把新箱重量按接触面积累加到各支撑箱的 carried。"""

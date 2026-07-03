@@ -2,6 +2,8 @@ import pytest
 
 from app.core.objectives import (
     Balanced,
+    CenterOfGravity,
+    LoadingEfficiency,
     MaxUtilization,
     MinContainers,
     Stability,
@@ -15,6 +17,11 @@ def test_registry_returns_correct_types():
     assert isinstance(get_objective("min_containers"), MinContainers)
     assert isinstance(get_objective("stability"), Stability)
     assert isinstance(get_objective("balanced"), Balanced)
+    assert isinstance(get_objective("transport_cost"), MaxUtilization)
+    assert isinstance(get_objective("load_stability"), Stability)
+    assert isinstance(get_objective("weight_balance"), CenterOfGravity)
+    assert isinstance(get_objective("loading_efficiency"), LoadingEfficiency)
+    assert isinstance(get_objective("advanced_score"), Balanced)
 
 
 def test_unknown_objective_raises():
@@ -48,3 +55,10 @@ def test_order_containers_biggest_first():
     big = Container(id="b", inner_length=100, inner_width=100, inner_height=100, max_payload=1)
     ordered = MinContainers().order_containers([small, big])
     assert [c.id for c in ordered] == ["b", "s"]
+
+
+def test_loading_efficiency_prefers_inside_before_width():
+    obj = get_objective("loading_efficiency")
+    inside = obj.placement_score((0, 100, 0, 10, 10, 10))
+    outside = obj.placement_score((100, 0, 0, 10, 10, 10))
+    assert inside < outside

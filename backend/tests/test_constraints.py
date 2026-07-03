@@ -63,3 +63,9 @@ def test_commit_accumulates_carried_and_blocks_second():
     assert abs(base.carried - 10) < 1e-9
     second = (10, 0, 10, 10, 10, 10)  # 压在 base 右半 → 累计 20 > 15
     assert check_stack_load(second, 10, [base]) is False
+
+
+def test_default_support_requires_full_base_contact():
+    base = _pi((0, 0, 0, 10, 10, 10))
+    half = (5, 0, 10, 10, 10, 10)
+    assert check_support(half, [base]) is False

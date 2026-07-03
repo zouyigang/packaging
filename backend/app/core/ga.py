@@ -1,13 +1,7 @@
-"""遗传算法 / BRKGA 全局优化（M7，进阶后置项）。
+"""Genetic algorithm / BRKGA optimizer.
 
-思路（见 CLAUDE.md 第 6 节）：对「货品(待放置单元)的放置顺序」做全局搜索，
-以现有极点启发式为解码器——每个个体是一组随机键(random keys)，按键排序得到放置顺序，
-喂给 run_container_loop 解码成方案，再按当前优化目标算适应度，迭代进化。
-
-BRKGA 精简版：精英保留 + 偏置交叉 + 随机突变个体。种群里植入一个「默认大块先」
-个体，确保进化结果不劣于默认启发式（非退化保证）。
-
-朝向选择仍交给启发式逐位择优（find_placement）；朝向基因留待后续扩展。
+The chromosome is a random-key ordering of placeables. The packing loop remains
+responsible for decoding each ordered individual into a concrete solution.
 """
 from __future__ import annotations
 
@@ -15,7 +9,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..models.schemas import Item, Solution, SolveRequest
+from ..models.schemas import Container, Item, Solution, SolveRequest
+from .geometry import oriented_dims
 from .objectives import get_objective
 from .packer import (
     _Placeable,
@@ -31,7 +26,7 @@ class GAConfig:
     generations: int = 40
     elite_frac: float = 0.25
     mutant_frac: float = 0.20
-    inherit_prob: float = 0.70  # 交叉时从精英父代继承基因的概率
+    inherit_prob: float = 0.70
     seed: int = 0
 
 
@@ -39,8 +34,12 @@ def _cargo_volume(item: Item) -> float:
     return item.length * item.width * item.height
 
 
-def _make_fitness(objective_name: str, item_map: dict[str, Item]):
-    """返回 solution → 适应度(越大越优) 的函数。"""
+def _make_fitness(
+    objective_name: str,
+    item_map: dict[str, Item],
+    container_map: dict[str, Container],
+):
+    """Return a solution fitness function. Higher is better."""
 
     def packed_volume(sol: Solution) -> float:
         return sum(
@@ -50,12 +49,38 @@ def _make_fitness(objective_name: str, item_map: dict[str, Item]):
             if p.item_id in item_map
         )
 
-    if objective_name == "min_containers":
-        # 容器数越少越好；同容器数下装得越多越好。
+    def cog_penalty(sol: Solution) -> float:
+        penalty = 0.0
+        for loaded in sol.containers:
+            container = container_map.get(loaded.id)
+            if container is None:
+                continue
+            total_w = sum_wx = sum_wy = 0.0
+            for p in loaded.placements:
+                item = item_map.get(p.item_id)
+                if item is None:
+                    continue
+                dx, dy, dz = oriented_dims(item.length, item.width, item.height, p.orientation)
+                mass = item.weight if item.weight > 0 else dx * dy * dz
+                total_w += mass
+                sum_wx += mass * (p.x + dx / 2.0)
+                sum_wy += mass * (p.y + dy / 2.0)
+            if total_w <= 0:
+                continue
+            gx = sum_wx / total_w
+            gy = sum_wy / total_w
+            norm_x = abs(gx - container.inner_length / 2.0) / container.inner_length
+            norm_y = abs(gy - container.inner_width / 2.0) / container.inner_width
+            penalty += max(norm_x, norm_y) + norm_x + norm_y
+        return penalty
+
+    if objective_name in {"min_containers", "transport_cost"}:
         def fitness(sol: Solution) -> float:
             return -len(sol.containers) * 1e18 + packed_volume(sol)
+    elif objective_name in {"center_of_gravity", "weight_balance"}:
+        def fitness(sol: Solution) -> float:
+            return packed_volume(sol) * 1e6 - cog_penalty(sol)
     else:
-        # 利用率 / 稳定性 / 平衡：以装入货物总体积为主（装得多即利用率高）。
         def fitness(sol: Solution) -> float:
             return packed_volume(sol)
 
@@ -63,13 +88,14 @@ def _make_fitness(objective_name: str, item_map: dict[str, Item]):
 
 
 def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
-    """用 BRKGA 搜索放置顺序，返回最优方案。"""
+    """Search placeable order with BRKGA and return the best decoded solution."""
     cfg = config or GAConfig()
     objective = get_objective(request.objective)
     placeables: list[_Placeable] = _build_placeables(request, objective)
     containers = _expand_containers(request, objective)
     item_map = {i.id: i for i in request.items}
-    fitness = _make_fitness(request.objective, item_map)
+    container_map = {c.id: c for c in request.containers}
+    fitness = _make_fitness(request.objective, item_map, container_map)
 
     m = len(placeables)
     if m == 0:
@@ -77,7 +103,6 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
 
     rng = np.random.default_rng(cfg.seed)
     pop = rng.random((cfg.population, m))
-    # 植入「默认顺序」个体：键升序 → argsort 还原 placeables 现有(大块先)顺序。
     pop[0] = np.linspace(0.0, 1.0, m)
 
     n_elite = max(1, int(cfg.population * cfg.elite_frac))
@@ -98,15 +123,14 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     best_sol, best_score = sols[best_idx], scores[best_idx]
 
     for _ in range(cfg.generations):
-        order = np.argsort(-scores)  # 适应度降序
+        order = np.argsort(-scores)
         pop = pop[order]
         scores = scores[order]
         sols = [sols[i] for i in order]
 
         elites = pop[:n_elite]
-        # 下一代：精英直传 + 突变体 + 偏置交叉
         children = [elites]
-        children.append(rng.random((n_mutant, m)))  # 突变体
+        children.append(rng.random((n_mutant, m)))
         n_cross = cfg.population - n_elite - n_mutant
         if n_cross > 0:
             elite_parents = elites[rng.integers(0, n_elite, n_cross)]

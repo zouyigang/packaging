@@ -57,3 +57,58 @@ def test_deterministic():
     c1 = [(p.x, p.y, p.z, p.seq) for c in s1.containers for p in c.placements]
     c2 = [(p.x, p.y, p.z, p.seq) for c in s2.containers for p in c.placements]
     assert c1 == c2
+
+
+def test_mixed_default_load_centers_both_axes():
+    items = [
+        Item(id="box-A", length=600, width=400, height=400, weight=20, quantity=8),
+        Item(id="box-B", length=400, width=300, height=300, weight=8, quantity=12),
+    ]
+    container = Container(
+        id="cntr", inner_length=5900, inner_width=2350, inner_height=2390,
+        max_payload=28000, quantity=1,
+    )
+    sol = solve(SolveRequest(items=items, containers=[container], objective="center_of_gravity"))
+
+    cx, cy = container.inner_length / 2, container.inner_width / 2
+    tw = sx = sy = 0.0
+    item_map = {item.id: item for item in items}
+    for p in sol.containers[0].placements:
+        item = item_map[p.item_id]
+        dx, dy, dz = oriented_dims(item.length, item.width, item.height, p.orientation)
+        mass = item.weight if item.weight > 0 else dx * dy * dz
+        tw += mass
+        sx += mass * (p.x + dx / 2)
+        sy += mass * (p.y + dy / 2)
+
+    assert abs(sx / tw - cx) < 150
+    assert abs(sy / tw - cy) < 100
+
+
+def test_center_of_gravity_prefers_low_load_over_vertical_tower():
+    items = [
+        Item(id="box-A", length=600, width=400, height=400, weight=20, quantity=8),
+        Item(id="box-B", length=400, width=300, height=300, weight=8, quantity=12),
+    ]
+    container = Container(
+        id="cntr", inner_length=5900, inner_width=2350, inner_height=2390,
+        max_payload=28000, quantity=1,
+    )
+
+    sol = solve(SolveRequest(items=items, containers=[container], objective="center_of_gravity"))
+
+    item_map = {item.id: item for item in items}
+    max_top = 0.0
+    tw = sx = sy = 0.0
+    for p in sol.containers[0].placements:
+        item = item_map[p.item_id]
+        dx, dy, dz = oriented_dims(item.length, item.width, item.height, p.orientation)
+        mass = item.weight if item.weight > 0 else dx * dy * dz
+        max_top = max(max_top, p.z + dz)
+        tw += mass
+        sx += mass * (p.x + dx / 2)
+        sy += mass * (p.y + dy / 2)
+
+    assert max_top <= 600
+    assert abs(sx / tw - container.inner_length / 2) / container.inner_length <= 0.25
+    assert abs(sy / tw - container.inner_width / 2) / container.inner_width <= 0.25

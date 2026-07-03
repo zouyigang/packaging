@@ -1,6 +1,7 @@
 import { Empty } from 'antd'
 import { useStore } from '../store/useStore'
 import { orientedDims, colorForCategory } from '../three/geometry'
+import { calculateCenterOfGravity } from '../utils/cog'
 
 // 2D 俯视装载图：沿 z 轴向下看，画出当前容器各货品在 x-y 平面的投影。
 // 低层先画、高层后画（叠在上面），高度越高描边越深以示层次。
@@ -34,6 +35,11 @@ export default function TopView() {
     .sort((a, b) => a.p.z - b.p.z) // 低层先画
 
   const maxZ = Math.max(1, ...boxes.map((b) => b.ztop))
+  const cog = calculateCenterOfGravity(
+    loaded.placements.filter((p) => p.seq <= seqCursor),
+    itemMap,
+    cdef,
+  )
 
   // 从可见的托盘货品反推各托盘底板（俯视下的 footprint），画在货品下层。
   const deckGroups = {}
@@ -63,6 +69,10 @@ export default function TopView() {
       >
         {/* 容器外框 */}
         <rect x={0} y={0} width={L} height={W} fill="#fafafa" stroke="#1677ff" strokeWidth={L * 0.003} />
+        <g opacity="0.55">
+          <line x1={L / 2} y1={0} x2={L / 2} y2={W} stroke="#94a3b8" strokeWidth={L * 0.0012} strokeDasharray={`${L * 0.01} ${L * 0.01}`} />
+          <line x1={0} y1={W / 2} x2={L} y2={W / 2} stroke="#94a3b8" strokeWidth={L * 0.0012} strokeDasharray={`${L * 0.01} ${L * 0.01}`} />
+        </g>
         {/* 托盘底板（画在货品下层） */}
         {decks.map((d, i) => (
           <rect
@@ -92,8 +102,17 @@ export default function TopView() {
             </g>
           )
         })}
+        {cog && (
+          <g>
+            <circle cx={cog.x} cy={cog.y} r={L * 0.012} fill="none" stroke="#ef4444" strokeWidth={L * 0.003} />
+            <circle cx={cog.x} cy={cog.y} r={L * 0.0045} fill="#ef4444" />
+            <line x1={cog.x - L * 0.018} y1={cog.y} x2={cog.x + L * 0.018} y2={cog.y} stroke="#ef4444" strokeWidth={L * 0.002} />
+            <line x1={cog.x} y1={cog.y - L * 0.018} x2={cog.x} y2={cog.y + L * 0.018} stroke="#ef4444" strokeWidth={L * 0.002} />
+            <text x={cog.x + L * 0.018} y={cog.y - L * 0.018} fontSize={L * 0.018} fill="#ef4444">重心</text>
+          </g>
+        )}
         <text x={L / 2} y={-PAD * 0.3} fontSize={L * 0.02} textAnchor="middle" fill="#999">
-          长 {L} × 宽 {W} mm（俯视）
+          长 {L} × 宽 {W} cm（俯视）
         </text>
       </svg>
     </div>

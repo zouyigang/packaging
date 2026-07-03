@@ -20,7 +20,15 @@ from ..models.schemas import (
     Solution,
     SolveRequest,
 )
-from .constraints import PlacedItem, commit_stack_load
+from .constraints import (
+    DEFAULT_COG_MAX_OFFSET_RATIO,
+    EPS,
+    PlacedItem,
+    check_cog_within_limits,
+    check_heavy_low,
+    check_stacking_type,
+    commit_stack_load,
+)
 from .extreme_point import find_placement
 from .geometry import box_volume
 from .objectives import Objective, ScoreContext, get_objective
@@ -81,6 +89,7 @@ class _Placeable:
     height: float
     allowed_rotations: list[str]
     weight: float
+    stacking_type: str
     max_load_top: float | None  # 顶部可承重；托盘块为 None(此处不再向上堆叠)
     contents: list | None  # list[(item_id, x, y, z, orientation)] 相对块原点；None=单件
 
@@ -118,6 +127,15 @@ class _Placeable:
         return out
 
 
+def _effective_stacking_type(item: Item) -> str:
+    if not item.stackable and item.stacking_type == "stackable":
+        return "not_stackable"
+    return item.stacking_type
+
+
+def _can_palletize_item(item: Item) -> bool:
+    return item.stackable and _effective_stacking_type(item) in {"stackable", "same_item_only"}
+
 def _single_placeable(item: Item) -> _Placeable:
     return _Placeable(
         item_id=item.id,
@@ -127,6 +145,7 @@ def _single_placeable(item: Item) -> _Placeable:
         height=item.height,
         allowed_rotations=item.allowed_rotations,
         weight=item.weight,
+        stacking_type=_effective_stacking_type(item),
         max_load_top=item.max_load_top,
         contents=None,
     )
@@ -141,6 +160,7 @@ def _composite_placeable(load) -> _Placeable:
         height=load.total_height,
         allowed_rotations=["LWH"],  # 托盘块 M3 固定朝向
         weight=load.total_weight,
+        stacking_type="stackable",
         max_load_top=None,
         contents=load.contents,
     )
@@ -153,7 +173,7 @@ def _build_placeables(request: SolveRequest, objective: Objective) -> list[_Plac
 
     for item in request.items:
         remaining = item.quantity
-        pallet = select_pallet(item, pallets, objective) if (item.stackable and pallets) else None
+        pallet = select_pallet(item, pallets, objective) if (_can_palletize_item(item) and pallets) else None
 
         if pallet is not None:
             sample = build_pallet_load(item, pallet, objective, instance_id=f"{pallet.id}#probe")
@@ -186,6 +206,7 @@ def _pack_placeables_into_container(
     ep_set = ExtremePointSet()
     placed_items: list[PlacedItem] = []
     leftover: list[_Placeable] = []
+    placement_boxes: list[tuple[Placement, tuple[float, float, float, float, float, float]]] = []
     seq = 0
     used_volume = 0.0
     used_weight = 0.0
@@ -200,6 +221,64 @@ def _pack_placeables_into_container(
             leftover.append(pl)
             continue
         ctx.unit_w = pl.weight
+
+        def balance_points(dx: float, dy: float, dz: float) -> list[tuple[float, float, float]]:
+            mass = pl.weight if pl.weight > 0 else dx * dy * dz
+            if mass <= 0:
+                return []
+            total = ctx.total_w + mass
+            bx = (container.inner_length / 2.0 * total - ctx.sum_wx) / mass
+            by = (container.inner_width / 2.0 * total - ctx.sum_wy) / mass
+            ideal_x = bx - dx / 2.0
+            ideal_y = by - dy / 2.0
+            max_x_offset = DEFAULT_COG_MAX_OFFSET_RATIO * container.inner_length
+            max_y_offset = DEFAULT_COG_MAX_OFFSET_RATIO * container.inner_width
+            low_bx = ((container.inner_length / 2.0 - max_x_offset) * total - ctx.sum_wx) / mass
+            high_bx = ((container.inner_length / 2.0 + max_x_offset) * total - ctx.sum_wx) / mass
+            low_by = ((container.inner_width / 2.0 - max_y_offset) * total - ctx.sum_wy) / mass
+            high_by = ((container.inner_width / 2.0 + max_y_offset) * total - ctx.sum_wy) / mass
+            xs = [
+                ideal_x,
+                max(0.0, min(ideal_x, container.inner_length - dx)),
+                low_bx - dx / 2.0,
+                high_bx - dx / 2.0,
+            ]
+            ys = [
+                ideal_y,
+                max(0.0, min(ideal_y, container.inner_width - dy)),
+                low_by - dy / 2.0,
+                high_by - dy / 2.0,
+            ]
+            xs.extend([0.0, container.inner_length - dx])
+            ys.extend([0.0, container.inner_width - dy])
+            zs = [0.0]
+            zs.extend(pi.box[2] + pi.box[5] for pi in placed_items)
+
+            points: list[tuple[float, float, float]] = []
+            seen: set[tuple[float, float, float]] = set()
+            for x in xs:
+                for y in ys:
+                    for z in zs:
+                        point = (x, y, z)
+                        if point in seen:
+                            continue
+                        seen.add(point)
+                        points.append(point)
+            return points
+
+        def hard_constraints(box) -> bool:
+            return (
+                check_stacking_type(box, pl.item_id, pl.stacking_type, placed_items)
+                and check_heavy_low(box, pl.weight, placed_items)
+                and check_cog_within_limits(
+                    box,
+                    pl.weight,
+                    placed_items,
+                    container.inner_length,
+                    container.inner_width,
+                )
+            )
+
         cand = find_placement(
             pl.length,
             pl.width,
@@ -212,6 +291,8 @@ def _pack_placeables_into_container(
             container.inner_height,
             score_fn=scorer,
             weight=pl.weight,
+            extra_points_fn=balance_points,
+            hard_constraint_fn=hard_constraints,
         )
         if cand is None:
             leftover.append(pl)
@@ -219,11 +300,13 @@ def _pack_placeables_into_container(
         px, py, pz, *_ = cand.box
         emitted = pl.emit(px, py, pz, cand.orientation, start_seq=seq)
         loaded.placements.extend(emitted)
+        placement_boxes.extend((p, cand.box) for p in emitted)
         seq += len(emitted)
         commit_stack_load(cand.box, pl.weight, placed_items)
         placed_items.append(PlacedItem(
             box=cand.box, weight=pl.weight,
             max_load_top=pl.max_load_top, item_id=pl.item_id,
+            stacking_type=pl.stacking_type,
         ))
         ep_set.remove(cand.point)
         ep_set.add_from_placement(cand.box)
@@ -244,8 +327,54 @@ def _pack_placeables_into_container(
     loaded.weight_utilization = (
         used_weight / container.max_payload if container.max_payload else 0.0
     )
+    _resequence_inside_to_outside(loaded, placement_boxes)
     return loaded, leftover
 
+
+def _resequence_inside_to_outside(
+    loaded: LoadedContainer,
+    placement_boxes: list[tuple[Placement, tuple[float, float, float, float, float, float]]],
+) -> None:
+    """Assign loading seq from container inside to door while honoring support deps."""
+    records = list(placement_boxes)
+    deps: list[set[int]] = [set() for _ in records]
+
+    for i, (_p, box) in enumerate(records):
+        x, y, z, dx, dy, _dz = box
+        if z <= EPS:
+            continue
+        for j, (_below_p, below) in enumerate(records):
+            if i == j:
+                continue
+            bx, by, bz, bdx, bdy, bdz = below
+            if abs((bz + bdz) - z) > EPS:
+                continue
+            ox = max(0.0, min(x + dx, bx + bdx) - max(x, bx))
+            oy = max(0.0, min(y + dy, by + bdy) - max(y, by))
+            if ox * oy > EPS:
+                deps[i].add(j)
+
+    remaining = set(range(len(records)))
+    emitted: list[int] = []
+    while remaining:
+        ready = [i for i in remaining if deps[i].issubset(emitted)]
+        if not ready:
+            ready = list(remaining)
+        ready.sort(key=lambda i: _loading_priority(records[i]))
+        chosen = ready[0]
+        remaining.remove(chosen)
+        emitted.append(chosen)
+
+    ordered = [records[i][0] for i in emitted]
+    for seq, placement in enumerate(ordered, start=1):
+        placement.seq = seq
+    loaded.placements = ordered
+
+
+def _loading_priority(record: tuple[Placement, tuple[float, float, float, float, float, float]]) -> tuple[float, float, float, int]:
+    placement, box = record
+    _x, _y, z, _dx, _dy, _dz = box
+    return (placement.x, z, placement.y, placement.seq)
 
 def _expand_containers(request: SolveRequest, objective: Objective) -> list[Container]:
     """按目标排定容器开箱优先级，并展开各容器类型的可用数量。"""

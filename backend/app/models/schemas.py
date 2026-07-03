@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 六种轴对齐朝向：三个字母依次表示原始的 (长,宽,高) 中哪一维分别落在 x / y / z 轴。
 # 例：'LWH' 表示 x=长、y=宽、z=高（默认朝向）；'LHW' 表示把货品侧放，原本的高朝向 y。
@@ -16,7 +16,12 @@ Orientation = Literal["LWH", "WLH", "LHW", "HWL", "WHL", "HLW"]
 ALL_ORIENTATIONS: tuple[Orientation, ...] = ("LWH", "WLH", "LHW", "HWL", "WHL", "HLW")
 
 Objective = Literal[
+    "transport_cost", "load_stability", "weight_balance", "loading_efficiency",
+    "advanced_score",
     "max_utilization", "min_containers", "stability", "balanced", "center_of_gravity"
+]
+StackingType = Literal[
+    "not_stackable", "same_item_only", "stackable", "support_only", "top_only"
 ]
 
 
@@ -30,9 +35,18 @@ class Item(BaseModel):
     quantity: int = Field(ge=1, default=1)
     allowed_rotations: list[Orientation] = Field(default_factory=lambda: list(ALL_ORIENTATIONS))
     stackable: bool = True
+    stacking_type: StackingType = "stackable"
     # 顶部可承重 kg：None=未指定(无限制)，0=易碎不可压，>0=承重上限。
     max_load_top: Optional[float] = Field(ge=0, default=None)
     category: str = ""
+
+    @model_validator(mode="after")
+    def normalize_top_load_for_stacking_type(self):
+        if self.stacking_type in {"not_stackable", "top_only"}:
+            self.max_load_top = 0
+        if not self.stackable and self.stacking_type == "stackable":
+            self.max_load_top = 0
+        return self
 
 
 class Pallet(BaseModel):
@@ -84,5 +98,5 @@ class SolveRequest(BaseModel):
     items: list[Item] = Field(default_factory=list)
     pallets: list[Pallet] = Field(default_factory=list)
     containers: list[Container] = Field(default_factory=list)
-    objective: Objective = "max_utilization"
+    objective: Objective = "transport_cost"
     use_ga: bool = False  # True 时用遗传算法对放置顺序做全局优化（更慢，更优）

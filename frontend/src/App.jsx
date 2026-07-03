@@ -14,12 +14,16 @@ export default function App() {
   const items = useStore((s) => s.items)
 
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
-      <div style={{ width: 560, borderRight: '1px solid #f0f0f0', height: '100%' }}>
+    <div className="app-shell">
+      <aside className="app-sidebar">
         <EditPanel />
-      </div>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px', borderBottom: '1px solid #f0f0f0' }}>
+      </aside>
+      <main className="app-workspace">
+        <div className="app-topbar">
+          <div className="view-title">
+            <strong>装载视图</strong>
+            <span>方案预览与顺序回放</span>
+          </div>
           <Segmented options={['3D', '2D 俯视']} value={view} onChange={setView} />
           <div style={{ flex: 1 }} />
           <Button
@@ -30,11 +34,11 @@ export default function App() {
             导出 CSV
           </Button>
         </div>
-        <div style={{ flex: 1, minHeight: 0, background: '#fafafa' }}>
+        <div className="app-viewport">
           {view === '3D' ? <Scene /> : <TopView />}
         </div>
         <ResultPanel />
-      </div>
+      </main>
     </div>
   )
 }

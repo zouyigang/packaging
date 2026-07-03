@@ -5,7 +5,7 @@ export function exportSolutionCsv(solution, items) {
   const itemMap = Object.fromEntries(items.map((i) => [i.id, i]))
   const header = [
     '容器序号', '容器id', '装箱顺序seq', '货品id', '托盘id',
-    'x(mm)', 'y(mm)', 'z(mm)', '朝向', '长dx', '宽dy', '高dz', '重量kg',
+    'x(cm)', 'y(cm)', 'z(cm)', '朝向', '长dx(cm)', '宽dy(cm)', '高dz(cm)', '重量(kg)',
   ]
   const rows = [header]
 

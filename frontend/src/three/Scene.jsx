@@ -2,6 +2,7 @@ import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Edges } from '@react-three/drei'
 import { useStore } from '../store/useStore'
 import { orientedDims, colorForCategory } from './geometry'
+import { calculateCenterOfGravity } from '../utils/cog'
 
 const SCALE = 0.01 // mm → 场景单位（1000mm = 10）
 
@@ -75,6 +76,32 @@ function ContainerBox({ container }) {
   )
 }
 
+function CogMarker({ cog }) {
+  if (!cog) return null
+  const pos = toScene(cog.x, cog.y, cog.z)
+  const ground = toScene(cog.x, cog.y, 0)
+  const height = Math.max(0.01, pos[1] - ground[1])
+  return (
+    <group renderOrder={999}>
+      <mesh position={pos} renderOrder={999}>
+        <sphereGeometry args={[0.28, 32, 32]} />
+        <meshBasicMaterial color="#ef4444" depthTest={false} depthWrite={false} />
+      </mesh>
+      <mesh position={pos} rotation={[-Math.PI / 2, 0, 0]} renderOrder={999}>
+        <ringGeometry args={[0.38, 0.48, 40]} />
+        <meshBasicMaterial color="#ef4444" depthTest={false} depthWrite={false} />
+      </mesh>
+      <mesh position={ground} rotation={[-Math.PI / 2, 0, 0]} renderOrder={999}>
+        <ringGeometry args={[0.3, 0.42, 40]} />
+        <meshBasicMaterial color="#ef4444" depthTest={false} depthWrite={false} />
+      </mesh>
+      <mesh position={[pos[0], ground[1] + height / 2, pos[2]]} renderOrder={999}>
+        <cylinderGeometry args={[0.035, 0.035, height, 12]} />
+        <meshBasicMaterial color="#ef4444" depthTest={false} depthWrite={false} />
+      </mesh>
+    </group>
+  )
+}
 export default function Scene() {
   const solution = useStore((s) => s.solution)
   const items = useStore((s) => s.items)
@@ -92,6 +119,7 @@ export default function Scene() {
 
   const visible = (loaded?.placements || []).filter((p) => p.seq <= seqCursor)
   const decks = deriveDecks(visible, palletMap)
+  const cog = calculateCenterOfGravity(visible, itemMap, cdef)
 
   // 让相机大致对准容器中心
   const cx = (cdef?.inner_length || 5900) * SCALE
@@ -109,6 +137,7 @@ export default function Scene() {
       {visible.map((p, i) => (
         <Box key={`${p.item_id}-${p.seq}-${i}`} placement={p} item={itemMap[p.item_id]} />
       ))}
+      <CogMarker cog={cog} />
       <gridHelper args={[200, 40, '#ccc', '#eee']} />
       <OrbitControls makeDefault target={cdef ? [cx / 2, 0, (cdef.inner_width * SCALE) / 2] : [0, 0, 0]} />
     </Canvas>

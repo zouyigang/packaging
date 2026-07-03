@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { Slider, Button, Segmented, Statistic, Row, Col, Tag, Empty, Space } from 'antd'
+import { Slider, Button, Segmented, Tag, Empty } from 'antd'
 import { CaretRightOutlined, PauseOutlined, StepBackwardOutlined } from '@ant-design/icons'
 import { useStore } from '../store/useStore'
+import { calculateCenterOfGravity, formatPercent } from '../utils/cog'
 
 export default function ResultPanel() {
   const solution = useStore((s) => s.solution)
+  const items = useStore((s) => s.items)
+  const containersInput = useStore((s) => s.containers)
   const activeContainer = useStore((s) => s.activeContainer)
   const setActiveContainer = useStore((s) => s.setActiveContainer)
   const seqCursor = useStore((s) => s.seqCursor)
@@ -14,8 +17,11 @@ export default function ResultPanel() {
 
   const loaded = solution?.containers?.[activeContainer]
   const total = loaded?.placements.length || 0
+  const itemMap = Object.fromEntries(items.map((item) => [item.id, item]))
+  const cdef = containersInput.find((container) => container.id === loaded?.id) || containersInput[0]
+  const visible = (loaded?.placements || []).filter((placement) => placement.seq <= seqCursor)
+  const cog = calculateCenterOfGravity(visible, itemMap, cdef)
 
-  // 自动回放：每 200ms 前进一步，到末尾停止。
   useEffect(() => {
     if (!playing) return
     timer.current = setInterval(() => {
@@ -32,8 +38,8 @@ export default function ResultPanel() {
 
   if (!solution) {
     return (
-      <div style={{ padding: 16 }}>
-        <Empty description="点击「求解装箱」查看方案与回放" />
+      <div className="result-panel">
+        <Empty description="点击求解装箱后查看方案" />
       </div>
     )
   }
@@ -44,35 +50,23 @@ export default function ResultPanel() {
   }))
 
   return (
-    <div style={{ padding: '12px 16px', borderTop: '1px solid #f0f0f0' }}>
-      <Row gutter={16} align="middle">
-        <Col>
-          <Segmented
-            options={containerOptions}
-            value={activeContainer}
-            onChange={(v) => { setActiveContainer(v); setPlaying(false) }}
-          />
-        </Col>
-        <Col>
-          <Statistic title="体积利用率" valueStyle={{ fontSize: 16 }}
-            value={((loaded?.volume_utilization || 0) * 100).toFixed(1)} suffix="%" />
-        </Col>
-        <Col>
-          <Statistic title="重量利用率" valueStyle={{ fontSize: 16 }}
-            value={((loaded?.weight_utilization || 0) * 100).toFixed(1)} suffix="%" />
-        </Col>
-        <Col>
-          <Statistic title="件数" valueStyle={{ fontSize: 16 }} value={total} />
-        </Col>
-        <Col flex="auto" />
-        <Col>
-          {solution.unpacked.length > 0 && (
-            <Tag color="warning">余货 {solution.unpacked.length} 件</Tag>
-          )}
-        </Col>
-      </Row>
+    <div className="result-panel">
+      <div className="metric-strip">
+        <Segmented
+          options={containerOptions}
+          value={activeContainer}
+          onChange={(v) => { setActiveContainer(v); setPlaying(false) }}
+        />
+        <Metric label="体积利用率" value={`${((loaded?.volume_utilization || 0) * 100).toFixed(1)}%`} />
+        <Metric label="重量利用率" value={`${((loaded?.weight_utilization || 0) * 100).toFixed(1)}%`} />
+        <Metric label="件数" value={total} />
+        <Metric label="重心偏移率" value={cog ? formatPercent(cog.offsetRate) : '-'} />
+        <Metric label="重心位置" value={cog ? `${cog.x.toFixed(0)}, ${cog.y.toFixed(0)}, ${cog.z.toFixed(0)} cm` : '-'} compact />
+        <div style={{ flex: 1 }} />
+        {solution.unpacked.length > 0 && <Tag color="warning">余货 {solution.unpacked.length} 件</Tag>}
+      </div>
 
-      <Space style={{ marginTop: 8, width: '100%' }} align="center">
+      <div className="playback-row">
         <Button icon={<StepBackwardOutlined />} onClick={() => { setSeqCursor(0); setPlaying(false) }} />
         <Button
           type="primary"
@@ -85,14 +79,23 @@ export default function ResultPanel() {
           {playing ? '暂停' : '回放'}
         </Button>
         <Slider
-          style={{ flex: 1, width: 360 }}
+          style={{ flex: 1, minWidth: 220 }}
           min={0}
           max={total}
           value={seqCursor}
           onChange={(v) => { setSeqCursor(v); setPlaying(false) }}
         />
-        <span style={{ width: 70, textAlign: 'right' }}>{seqCursor} / {total}</span>
-      </Space>
+        <span className="playback-count">{seqCursor} / {total}</span>
+      </div>
+    </div>
+  )
+}
+
+function Metric({ label, value, compact = false }) {
+  return (
+    <div className="metric-card">
+      <div className="metric-label">{label}</div>
+      <div className={compact ? 'metric-value metric-value-compact' : 'metric-value'}>{value}</div>
     </div>
   )
 }

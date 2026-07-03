@@ -22,6 +22,8 @@ from .geometry import Box, box_within, boxes_overlap, oriented_dims
 from .space import ExtremePointSet, Point
 
 ScoreFn = Callable[[Box], tuple[float, ...]]
+PointFn = Callable[[float, float, float], list[Point]]
+HardConstraintFn = Callable[[Box], bool]
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ def find_placement(
     weight: float = 0.0,
     enforce_constraints: bool = True,
     min_support_ratio: float = DEFAULT_SUPPORT_RATIO,
+    extra_points_fn: PointFn | None = None,
+    hard_constraint_fn: HardConstraintFn | None = None,
 ) -> Candidate | None:
     """遍历极点 × 允许朝向，返回评分最优的可行放置；无解返回 None。
 
@@ -60,21 +64,38 @@ def find_placement(
     """
     score = score_fn or _default_score
     best: Candidate | None = None
-    for point in ep_set.points():
+
+    def try_candidate(point: Point, orientation: str, dx: float, dy: float, dz: float) -> None:
+        nonlocal best
         px, py, pz = point
+        box: Box = (px, py, pz, dx, dy, dz)
+        if not box_within(box, inner_length, inner_width, inner_height):
+            return
+        if any(boxes_overlap(box, pi.box) for pi in placed):
+            return
+        if enforce_constraints:
+            if not check_support(box, placed, min_support_ratio):
+                return
+            if not check_stack_load(box, weight, placed):
+                return
+            if hard_constraint_fn is not None and not hard_constraint_fn(box):
+                return
+        s = score(box)
+        if best is None or s < best.score:
+            best = Candidate(point=point, orientation=orientation, box=box, score=s)
+
+    for point in ep_set.points():
         for orientation in allowed_rotations:
             dx, dy, dz = oriented_dims(length, width, height, orientation)
-            box: Box = (px, py, pz, dx, dy, dz)
-            if not box_within(box, inner_length, inner_width, inner_height):
-                continue
-            if any(boxes_overlap(box, pi.box) for pi in placed):
-                continue
-            if enforce_constraints:
-                if not check_support(box, placed, min_support_ratio):
+            try_candidate(point, orientation, dx, dy, dz)
+
+    if best is None and extra_points_fn is not None:
+        seen = set(ep_set.points())
+        for orientation in allowed_rotations:
+            dx, dy, dz = oriented_dims(length, width, height, orientation)
+            for point in extra_points_fn(dx, dy, dz):
+                if point in seen:
                     continue
-                if not check_stack_load(box, weight, placed):
-                    continue
-            s = score(box)
-            if best is None or s < best.score:
-                best = Candidate(point=point, orientation=orientation, box=box, score=s)
+                seen.add(point)
+                try_candidate(point, orientation, dx, dy, dz)
     return best

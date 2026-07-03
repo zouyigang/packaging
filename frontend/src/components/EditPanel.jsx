@@ -2,44 +2,86 @@ import { Select, Button, Alert, Divider, Space, Switch, Tooltip } from 'antd'
 import EditableTable from './EditableTable'
 import { useStore } from '../store/useStore'
 
+const STACKING_TYPE_OPTIONS = [
+  { value: 'not_stackable', label: '独立放置', description: '上方不能压货，下方也不能垫其它货，只能直接落地' },
+  { value: 'same_item_only', label: '仅同品上下堆放', description: '上方/下方都允许，但直接接触的上下货品必须是同一种' },
+  { value: 'stackable', label: '可上下堆放', description: '上方可压货，下方也可垫货，无同品限制' },
+  { value: 'support_only', label: '仅作下层支撑', description: '只能在下层，上方可以压货，但自己下方不能有其它货' },
+  { value: 'top_only', label: '仅作上层货品', description: '只能放在其它货品上，上方不能再压货' },
+]
+
 const itemFields = [
-  { key: 'name', label: '名称', type: 'text', width: 90 },
-  { key: 'length', label: '长', type: 'number', width: 70 },
-  { key: 'width', label: '宽', type: 'number', width: 70 },
-  { key: 'height', label: '高', type: 'number', width: 70 },
-  { key: 'weight', label: '重(kg)', type: 'number', width: 75 },
-  { key: 'quantity', label: '数量', type: 'number', width: 65, min: 1 },
-  { key: 'stackable', label: '可堆叠', type: 'bool', width: 70 },
-  { key: 'max_load_top', label: '顶承重', type: 'number', width: 80 },
-  { key: 'category', label: '类别', type: 'text', width: 70 },
+  { key: 'name', label: '名称', type: 'text' },
+  { key: 'length', label: '长(cm)', type: 'number' },
+  { key: 'width', label: '宽(cm)', type: 'number' },
+  { key: 'height', label: '高(cm)', type: 'number' },
+  { key: 'weight', label: '重(kg)', type: 'number' },
+  { key: 'quantity', label: '数量', type: 'number', min: 1 },
+  { key: 'stacking_type', label: '堆叠类型', type: 'stacking_type_cards', options: STACKING_TYPE_OPTIONS, defaultValue: 'stackable' },
+  { key: 'allowed_rotations', label: '允许摆放姿态', type: 'orientation_groups' },
+  { key: 'max_load_top', label: '顶承重(kg)', type: 'number' },
+  { key: 'category', label: '类别', type: 'text' },
 ]
 
 const palletFields = [
-  { key: 'name', label: '名称', type: 'text', width: 90 },
-  { key: 'length', label: '长', type: 'number', width: 75 },
-  { key: 'width', label: '宽', type: 'number', width: 75 },
-  { key: 'deck_height', label: '台面高', type: 'number', width: 80 },
-  { key: 'max_stack_height', label: '限高', type: 'number', width: 80 },
-  { key: 'max_load', label: '限重(kg)', type: 'number', width: 85 },
-  { key: 'quantity', label: '数量', type: 'number', width: 65 },
+  { key: 'name', label: '名称', type: 'text' },
+  { key: 'length', label: '长(cm)', type: 'number' },
+  { key: 'width', label: '宽(cm)', type: 'number' },
+  { key: 'deck_height', label: '台面高(cm)', type: 'number' },
+  { key: 'max_stack_height', label: '限高(cm)', type: 'number' },
+  { key: 'max_load', label: '限重(kg)', type: 'number' },
+  { key: 'quantity', label: '数量', type: 'number' },
 ]
 
 const containerFields = [
-  { key: 'name', label: '名称', type: 'text', width: 90 },
-  { key: 'inner_length', label: '内长', type: 'number', width: 80 },
-  { key: 'inner_width', label: '内宽', type: 'number', width: 80 },
-  { key: 'inner_height', label: '内高', type: 'number', width: 80 },
-  { key: 'max_payload', label: '载重(kg)', type: 'number', width: 90 },
-  { key: 'quantity', label: '数量', type: 'number', width: 65, min: 1 },
+  { key: 'name', label: '名称', type: 'text' },
+  { key: 'inner_length', label: '内长(cm)', type: 'number' },
+  { key: 'inner_width', label: '内宽(cm)', type: 'number' },
+  { key: 'inner_height', label: '内高(cm)', type: 'number' },
+  { key: 'max_payload', label: '载重(kg)', type: 'number' },
+  { key: 'quantity', label: '数量', type: 'number', min: 1 },
+]
+
+const PRODUCTION_OBJECTIVES = [
+  {
+    value: 'transport_cost',
+    label: '运输成本优先',
+    description: '尽量少用容器/车辆，优先提高装载率，适合以运费和箱量为主要考核的发运场景。',
+  },
+  {
+    value: 'load_stability',
+    label: '装载稳定优先',
+    description: '更偏好低重心、大底面、少堆高，适合易损货、重货或对运输稳定性要求更高的场景。',
+  },
+  {
+    value: 'weight_balance',
+    label: '重心均衡优先',
+    description: '更关注前后/左右重量均衡，减少偏载风险，适合集装箱、车辆和长距离运输。',
+  },
+  {
+    value: 'loading_efficiency',
+    label: '装卸效率优先',
+    description: '更偏向下层先放、从里到外装、便于现场连续作业，减少返工和临时调整。',
+  },
+]
+
+const ADVANCED_OBJECTIVES = [
+  {
+    value: 'advanced_score',
+    label: '综合评分',
+    description: '高级模式：在装载率、稳定性、托盘化和位置评分之间做折中，适合需要调试算法效果的场景。',
+  },
 ]
 
 const OBJECTIVES = [
-  { value: 'max_utilization', label: '最大空间利用率' },
-  { value: 'min_containers', label: '最少容器数' },
-  { value: 'stability', label: '稳定性优先' },
-  { value: 'balanced', label: '综合平衡' },
-  { value: 'center_of_gravity', label: '重心居中' },
+  { label: '生产策略', options: PRODUCTION_OBJECTIVES },
+  { label: '高级模式', options: ADVANCED_OBJECTIVES },
 ]
+const FLAT_OBJECTIVES = [...PRODUCTION_OBJECTIVES, ...ADVANCED_OBJECTIVES]
+
+function objectiveMeta(value) {
+  return FLAT_OBJECTIVES.find((item) => item.value === value) || PRODUCTION_OBJECTIVES[0]
+}
 
 export default function EditPanel() {
   const objective = useStore((s) => s.objective)
@@ -49,30 +91,52 @@ export default function EditPanel() {
   const error = useStore((s) => s.error)
   const useGa = useStore((s) => s.useGa)
   const setUseGa = useStore((s) => s.setUseGa)
+  const selectedObjective = objectiveMeta(objective)
 
   return (
-    <div style={{ padding: 16, overflow: 'auto', height: '100%' }}>
-      <h2 style={{ marginTop: 0 }}>3D 装箱</h2>
+    <div className="edit-panel">
+      <div className="edit-header">
+        <h1>3D 装箱</h1>
+        <p>维护基础资源，生成可回放的装载方案</p>
+      </div>
+
       <EditableTable kind="items" title="货品" fields={itemFields} />
       <EditableTable kind="pallets" title="托盘（可选资源）" fields={palletFields} />
       <EditableTable kind="containers" title="容器" fields={containerFields} />
+
       <Divider />
-      <Space>
-        <span>优化目标</span>
-        <Select
-          value={objective}
-          onChange={setObjective}
-          options={OBJECTIVES}
-          style={{ width: 180 }}
-        />
-        <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
-          <Space size={4}>
-            <Switch size="small" checked={useGa} onChange={setUseGa} />
-            <span>GA 优化</span>
-          </Space>
-        </Tooltip>
-        <Button type="primary" loading={loading} onClick={solve}>求解装箱</Button>
-      </Space>
+      <div className="solve-card">
+        <div className="solve-grid">
+          <label>
+            <span className="field-label">装箱策略</span>
+            <Select
+              value={objective}
+              onChange={setObjective}
+              options={OBJECTIVES}
+              style={{ width: '100%' }}
+              optionRender={(option) => (
+                <div className="objective-option">
+                  <strong>{option.data.label}</strong>
+                  {option.data.description && <span>{option.data.description}</span>}
+                </div>
+              )}
+            />
+          </label>
+          <div className="objective-meaning">
+            <strong>{selectedObjective.label}</strong>
+            <span>{selectedObjective.description}</span>
+          </div>
+          <div className="solve-actions">
+            <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
+              <Space size={6}>
+                <Switch size="small" checked={useGa} onChange={setUseGa} />
+                <span>GA 优化</span>
+              </Space>
+            </Tooltip>
+            <Button type="primary" loading={loading} onClick={solve}>求解装箱</Button>
+          </div>
+        </div>
+      </div>
       {error && <Alert style={{ marginTop: 12 }} type="error" message={error} showIcon />}
     </div>
   )
