@@ -17,12 +17,31 @@ export function orientedDims(length, width, height, orientation) {
 
 // 按 category 稳定生成一个颜色（HSL），同类同色。
 // 用黄金角(137.5°)散布色相，避免相邻类别（如 'A'/'B'）色相只差 1° 而看不出区别。
-export function colorForCategory(category) {
-  const key = category || 'default'
+function hashKey(value) {
+  const key = String(value || 'default')
   let hash = 0
   for (let i = 0; i < key.length; i++) {
     hash = (hash * 31 + key.charCodeAt(i)) >>> 0
   }
-  const hue = Math.round((hash * 137.508) % 360)
-  return `hsl(${hue}, 65%, 52%)`
+  return hash
+}
+
+function hueForKey(value) {
+  return Math.round((hashKey(value) * 137.508) % 360)
+}
+
+export function colorForCategory(category) {
+  return `hsl(${hueForKey(category)}, 65%, 52%)`
+}
+
+export function colorForItem(item) {
+  if (!item?.customer_id) return colorForCategory(item?.category)
+
+  const baseHue = hueForKey(item.customer_id)
+  const variant = hashKey(item.id || item.name || item.category) % 7
+  const hueOffset = [-5, -3, -1, 0, 2, 4, 6][variant]
+  const saturation = [62, 66, 70, 64, 68, 72, 65][variant]
+  const lightness = [47, 51, 55, 49, 53, 57, 45][variant]
+  const hue = (baseHue + hueOffset + 360) % 360
+  return `hsl(${hue}, ${saturation}%, ${lightness}%)`
 }

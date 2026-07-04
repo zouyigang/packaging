@@ -1,7 +1,8 @@
 import { Empty } from 'antd'
 import { useStore } from '../store/useStore'
-import { orientedDims, colorForCategory } from '../three/geometry'
+import { orientedDims, colorForItem } from '../three/geometry'
 import { calculateCenterOfGravity } from '../utils/cog'
+import { filterPlacements } from '../utils/customerFilter'
 
 // 2D 俯视装载图：沿 z 轴向下看，画出当前容器各货品在 x-y 平面的投影。
 // 低层先画、高层后画（叠在上面），高度越高描边越深以示层次。
@@ -12,6 +13,8 @@ export default function TopView() {
   const containersInput = useStore((s) => s.containers)
   const activeContainer = useStore((s) => s.activeContainer)
   const seqCursor = useStore((s) => s.seqCursor)
+  const customerFilter = useStore((s) => s.customerFilter)
+  const itemFilter = useStore((s) => s.itemFilter)
 
   if (!solution) return <Empty style={{ marginTop: 60 }} description="先求解" />
 
@@ -25,8 +28,10 @@ export default function TopView() {
   const W = cdef.inner_width
   const PAD = L * 0.04
 
-  const boxes = loaded.placements
-    .filter((p) => p.seq <= seqCursor)
+  const sequenceVisible = loaded.placements.filter((p) => p.seq <= seqCursor)
+  const filteredPlacements = filterPlacements(sequenceVisible, itemMap, customerFilter, itemFilter)
+
+  const boxes = filteredPlacements
     .map((p) => {
       const it = itemMap[p.item_id]
       const [dx, dy, dz] = it ? orientedDims(it.length, it.width, it.height, p.orientation) : [0, 0, 0]
@@ -35,11 +40,7 @@ export default function TopView() {
     .sort((a, b) => a.p.z - b.p.z) // 低层先画
 
   const maxZ = Math.max(1, ...boxes.map((b) => b.ztop))
-  const cog = calculateCenterOfGravity(
-    loaded.placements.filter((p) => p.seq <= seqCursor),
-    itemMap,
-    cdef,
-  )
+  const cog = calculateCenterOfGravity(filteredPlacements, itemMap, cdef)
 
   // 从可见的托盘货品反推各托盘底板（俯视下的 footprint），画在货品下层。
   const deckGroups = {}
@@ -83,7 +84,7 @@ export default function TopView() {
           />
         ))}
         {boxes.map((b, i) => {
-          const fill = colorForCategory(b.it?.category)
+          const fill = colorForItem(b.it)
           const depth = 0.25 + 0.55 * (b.ztop / maxZ) // 越高越不透明
           return (
             <g key={`${b.p.seq}-${i}`}>

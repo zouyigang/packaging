@@ -1,8 +1,9 @@
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Edges } from '@react-three/drei'
 import { useStore } from '../store/useStore'
-import { orientedDims, colorForCategory } from './geometry'
+import { orientedDims, colorForItem } from './geometry'
 import { calculateCenterOfGravity } from '../utils/cog'
+import { filterPlacements } from '../utils/customerFilter'
 
 const SCALE = 0.01 // mm → 场景单位（1000mm = 10）
 
@@ -21,7 +22,7 @@ function Box({ placement, item }) {
   const pos = toScene(cx, cy, cz)
   const size = [dx * SCALE, dz * SCALE, dy * SCALE] // 注意 y/z 互换
   // 始终按类别上色；是否在托盘上由下方的托盘台面体现，不再用颜色区分。
-  const color = colorForCategory(item.category)
+  const color = colorForItem(item)
   return (
     <mesh position={pos}>
       <boxGeometry args={size} />
@@ -109,6 +110,8 @@ export default function Scene() {
   const containersInput = useStore((s) => s.containers)
   const activeContainer = useStore((s) => s.activeContainer)
   const seqCursor = useStore((s) => s.seqCursor)
+  const customerFilter = useStore((s) => s.customerFilter)
+  const itemFilter = useStore((s) => s.itemFilter)
 
   const itemMap = Object.fromEntries(items.map((i) => [i.id, i]))
   const palletMap = Object.fromEntries(pallets.map((p) => [p.id, p]))
@@ -117,7 +120,8 @@ export default function Scene() {
   const cdef =
     containersInput.find((c) => c.id === loaded?.id) || containersInput[0]
 
-  const visible = (loaded?.placements || []).filter((p) => p.seq <= seqCursor)
+  const sequenceVisible = (loaded?.placements || []).filter((p) => p.seq <= seqCursor)
+  const visible = filterPlacements(sequenceVisible, itemMap, customerFilter, itemFilter)
   const decks = deriveDecks(visible, palletMap)
   const cog = calculateCenterOfGravity(visible, itemMap, cdef)
 

@@ -32,6 +32,10 @@ const itemFields = [
   { key: 'allowed_rotations', label: '允许摆放姿态', type: 'orientation_groups' },
   { key: 'max_load_top', label: '顶承重(kg)', type: 'number' },
   { key: 'category', label: '类别', type: 'text' },
+  { key: 'customer_id', label: '客户', type: 'text' },
+  { key: 'order_id', label: '订单', type: 'text' },
+  { key: 'destination_id', label: '目的地', type: 'text' },
+  { key: 'stop_seq', label: '卸货顺序', type: 'number', min: 1 },
 ]
 
 const palletFields = [
@@ -73,8 +77,8 @@ const PRODUCTION_OBJECTIVES = [
   },
   {
     value: 'loading_efficiency',
-    label: '装卸效率优先',
-    description: '更偏向下层先放、从里到外装、便于现场连续作业，减少返工和临时调整。',
+    label: '装卸/多客户配送优先',
+    description: '按装货入口和卸货顺序安排位置，同一站点内尽量聚集相同客户或订单的货品。',
   },
 ]
 

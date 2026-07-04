@@ -5,6 +5,7 @@ export function exportSolutionCsv(solution, items) {
   const itemMap = Object.fromEntries(items.map((i) => [i.id, i]))
   const header = [
     '容器序号', '容器id', '装箱顺序seq', '货品id', '托盘id',
+    'customer_id', 'order_id', 'destination_id', 'stop_seq',
     'x(cm)', 'y(cm)', 'z(cm)', '朝向', '长dx(cm)', '宽dy(cm)', '高dz(cm)', '重量(kg)',
   ]
   const rows = [header]
@@ -18,6 +19,8 @@ export function exportSolutionCsv(solution, items) {
         : ['', '', '']
       rows.push([
         ci + 1, c.id, p.seq, p.item_id, p.pallet_id ?? '',
+        p.customer_id ?? it?.customer_id ?? '', p.order_id ?? it?.order_id ?? '',
+        p.destination_id ?? it?.destination_id ?? '', p.stop_seq ?? it?.stop_seq ?? 1,
         p.x, p.y, p.z, p.orientation, dx, dy, dz, it?.weight ?? '',
       ])
     })
