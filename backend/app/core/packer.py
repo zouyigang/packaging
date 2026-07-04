@@ -32,7 +32,7 @@ from .constraints import (
 )
 from .extreme_point import find_placement
 from .geometry import box_volume
-from .objectives import Objective, ScoreContext, get_objective
+from .objectives import Objective, ScoreContext, delivery_group_keys, get_objective
 from .palletizer import (
     build_pallet_load,
     pallet_load_efficiency,
@@ -58,11 +58,12 @@ def pack_units_into_container(
 
     返回 (装载结果, 未能放入的剩余单件)。units 应已按放置优先级排好序。
     """
-    placeables = [_single_placeable(u) for u in units]
-    pairs = list(zip(placeables, units))
+    raw_placeables = [_single_placeable(u) for u in units]
+    unit_by_placeable_id = {id(p): u for p, u in zip(raw_placeables, units)}
+    placeables = objective.order_placeables(raw_placeables)
     loaded, leftover_pl = _pack_placeables_into_container(placeables, container, objective)
     left_ids = {id(p) for p in leftover_pl}
-    leftover_units = [u for p, u in pairs if id(p) in left_ids]
+    leftover_units = [unit_by_placeable_id[id(p)] for p in raw_placeables if id(p) in left_ids]
     return loaded, leftover_units
 
 
@@ -90,6 +91,10 @@ class _Placeable:
     height: float
     allowed_rotations: list[str]
     weight: float
+    customer_id: str
+    order_id: str
+    destination_id: str
+    stop_seq: int
     stacking_type: str
     max_load_top: float | None  # 顶部可承重；托盘块为 None(此处不再向上堆叠)
     contents: list | None  # list[(item_id, x, y, z, orientation)] 相对块原点；None=单件
@@ -105,6 +110,10 @@ class _Placeable:
                 Placement(
                     item_id=self.item_id,
                     pallet_id=None,
+                    customer_id=self.customer_id,
+                    order_id=self.order_id,
+                    destination_id=self.destination_id,
+                    stop_seq=self.stop_seq,
                     x=px,
                     y=py,
                     z=pz,
@@ -118,6 +127,10 @@ class _Placeable:
                 Placement(
                     item_id=cid,
                     pallet_id=self.pallet_id,
+                    customer_id=self.customer_id,
+                    order_id=self.order_id,
+                    destination_id=self.destination_id,
+                    stop_seq=self.stop_seq,
                     x=px + ox,
                     y=py + oy,
                     z=pz + oz,
@@ -146,13 +159,17 @@ def _single_placeable(item: Item) -> _Placeable:
         height=item.height,
         allowed_rotations=item.allowed_rotations,
         weight=item.weight,
+        customer_id=item.customer_id,
+        order_id=item.order_id,
+        destination_id=item.destination_id,
+        stop_seq=item.stop_seq,
         stacking_type=_effective_stacking_type(item),
         max_load_top=item.max_load_top,
         contents=None,
     )
 
 
-def _composite_placeable(load) -> _Placeable:
+def _composite_placeable(load, item: Item) -> _Placeable:
     return _Placeable(
         item_id=load.contents[0][0],
         pallet_id=load.pallet_id,
@@ -161,6 +178,10 @@ def _composite_placeable(load) -> _Placeable:
         height=load.total_height,
         allowed_rotations=["LWH"],  # 托盘块 M3 固定朝向
         weight=load.total_weight,
+        customer_id=item.customer_id,
+        order_id=item.order_id,
+        destination_id=item.destination_id,
+        stop_seq=item.stop_seq,
         stacking_type="stackable",
         max_load_top=None,
         contents=load.contents,
@@ -188,7 +209,7 @@ def _build_placeables(request: SolveRequest, objective: Objective) -> list[_Plac
                     )
                     if load.count == 0:
                         break
-                    placeables.append(_composite_placeable(load))
+                    placeables.append(_composite_placeable(load, item))
                     remaining -= load.count
                     pallet.quantity -= 1
 
@@ -196,8 +217,7 @@ def _build_placeables(request: SolveRequest, objective: Objective) -> list[_Plac
             placeables.append(_single_placeable(item))
 
     # 大块先放，利于稳定与填充。
-    placeables.sort(key=lambda p: p.length * p.width * p.height, reverse=True)
-    return placeables
+    return objective.order_placeables(placeables)
 
 
 def _pack_placeables_into_container(
@@ -215,6 +235,10 @@ def _pack_placeables_into_container(
     # 评分上下文（含累计重心信息），供重心居中等目标使用；默认目标忽略它。
     ctx = ScoreContext(inner_length=container.inner_length, inner_width=container.inner_width, inner_height=container.inner_height)
     ctx.loading_access_sides = tuple(access.side for access in _effective_loading_accesses(container))
+    if placeables:
+        stops = [max(1, int(pl.stop_seq or 1)) for pl in placeables]
+        ctx.min_stop_seq = min(stops)
+        ctx.max_stop_seq = max(stops)
     scorer = objective.make_scorer(ctx)
 
     for pl in placeables:
@@ -223,6 +247,9 @@ def _pack_placeables_into_container(
             leftover.append(pl)
             continue
         ctx.unit_w = pl.weight
+        ctx.current_stop_seq = max(1, int(pl.stop_seq or 1))
+        ctx.current_customer_id = pl.customer_id
+        ctx.current_order_id = pl.order_id
 
         def balance_points(dx: float, dy: float, dz: float) -> list[tuple[float, float, float]]:
             mass = pl.weight if pl.weight > 0 else dx * dy * dz
@@ -319,8 +346,11 @@ def _pack_placeables_into_container(
         bdx, bdy, bdz = cand.box[3], cand.box[4], cand.box[5]
         mass = pl.weight if pl.weight > 0 else bdx * bdy * bdz
         ctx.total_w += mass
-        ctx.sum_wx += mass * (px + bdx / 2.0)
-        ctx.sum_wy += mass * (py + bdy / 2.0)
+        center_x = px + bdx / 2.0
+        center_y = py + bdy / 2.0
+        ctx.sum_wx += mass * center_x
+        ctx.sum_wy += mass * center_y
+        _update_delivery_groups(ctx, pl, center_x, center_y)
 
     container_volume = (
         container.inner_length * container.inner_width * container.inner_height
@@ -329,14 +359,23 @@ def _pack_placeables_into_container(
     loaded.weight_utilization = (
         used_weight / container.max_payload if container.max_payload else 0.0
     )
-    _resequence_inside_to_outside(loaded, placement_boxes, container)
+    _resequence_inside_to_outside(
+        loaded, placement_boxes, container, objective.name in {"loading_efficiency", "multi_customer_delivery"}
+    )
     return loaded, leftover
+
+
+def _update_delivery_groups(ctx: ScoreContext, pl: _Placeable, center_x: float, center_y: float) -> None:
+    for key in delivery_group_keys(max(1, int(pl.stop_seq or 1)), pl.customer_id, pl.order_id):
+        count, sum_x, sum_y = ctx.delivery_groups.get(key, (0.0, 0.0, 0.0))
+        ctx.delivery_groups[key] = (count + 1.0, sum_x + center_x, sum_y + center_y)
 
 
 def _resequence_inside_to_outside(
     loaded: LoadedContainer,
     placement_boxes: list[tuple[Placement, tuple[float, float, float, float, float, float]]],
     container: Container,
+    use_stop_priority: bool = False,
 ) -> None:
     """Assign loading seq from container inside to door while honoring support deps."""
     records = list(placement_boxes)
@@ -363,7 +402,7 @@ def _resequence_inside_to_outside(
         ready = [i for i in remaining if deps[i].issubset(emitted)]
         if not ready:
             ready = list(remaining)
-        ready.sort(key=lambda i: _loading_priority(records[i], container))
+        ready.sort(key=lambda i: _loading_priority(records[i], container, use_stop_priority))
         chosen = ready[0]
         remaining.remove(chosen)
         emitted.append(chosen)
@@ -377,30 +416,33 @@ def _resequence_inside_to_outside(
 def _loading_priority(
     record: tuple[Placement, tuple[float, float, float, float, float, float]],
     container: Container,
-) -> tuple[float, float, float, float, float, int]:
+    use_stop_priority: bool = False,
+) -> tuple[float, ...]:
     placement, box = record
     x, y, z, dx, dy, dz = box
     accesses = _effective_loading_accesses(container)
     sides = tuple(access.side for access in accesses)
     single_side = sides[0] if len(sides) == 1 else None
 
+    stop_priority = -max(1, int(getattr(placement, "stop_seq", 1) or 1)) if use_stop_priority else 0
+
     if single_side in {"x_min", "x_max"}:
-        return (-_access_depth(box, accesses[0], container), z, y, x, 0.0, placement.seq)
+        return (stop_priority, -_access_depth(box, accesses[0], container), z, y, x, 0.0, placement.seq)
 
     if single_side in {"y_min", "y_max"}:
         center_x = abs((x + dx / 2.0) - container.inner_length / 2.0)
-        return (_access_depth(box, accesses[0], container), z, center_x, x, y, placement.seq)
+        return (stop_priority, _access_depth(box, accesses[0], container), z, center_x, x, y, placement.seq)
 
     if single_side == "z_max":
         center = (
             abs((x + dx / 2.0) - container.inner_length / 2.0)
             + abs((y + dy / 2.0) - container.inner_width / 2.0)
         )
-        return (z, center, -(dx * dy), x, y, placement.seq)
+        return (stop_priority, z, center, -(dx * dy), x, y, placement.seq)
 
     nearest = min(accesses, key=lambda access: _access_depth(box, access, container))
     partition = _access_rank(nearest.side)
-    return (partition, _access_depth(box, nearest, container), z, x, y, placement.seq)
+    return (stop_priority, partition, _access_depth(box, nearest, container), z, x, y, placement.seq)
 
 
 def _effective_loading_accesses(container: Container) -> list[LoadingAccess]:

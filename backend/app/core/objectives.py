@@ -10,8 +10,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from ..models.schemas import Container
 from .geometry import Box
@@ -35,6 +35,12 @@ class ScoreContext:
     total_w: float = 0.0  # 已放货物累计质量
     sum_wx: float = 0.0   # Σ 质量 × 中心x
     sum_wy: float = 0.0   # Σ 质量 × 中心y
+    current_stop_seq: int = 1
+    current_customer_id: str = ""
+    current_order_id: str = ""
+    min_stop_seq: int = 1
+    max_stop_seq: int = 1
+    delivery_groups: dict[tuple[str, int, str], tuple[float, float, float]] = field(default_factory=dict)
 
 
 class Objective:
@@ -55,6 +61,9 @@ class Objective:
 
     def order_containers(self, containers: list[Container]) -> list[Container]:
         return list(containers)
+
+    def order_placeables(self, placeables: list[Any]) -> list[Any]:
+        return sorted(placeables, key=lambda p: p.length * p.width * p.height, reverse=True)
 
     def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
         """是否对某货品采用「先码托盘再装」。
@@ -141,9 +150,21 @@ class CenterOfGravity(Objective):
 
 
 class LoadingEfficiency(Objective):
-    """Loading efficiency: adapt placement to the configured loading access."""
+    """Loading efficiency with stop sequencing and soft customer/order clustering."""
 
     name = "loading_efficiency"
+
+    def order_placeables(self, placeables: list[Any]) -> list[Any]:
+        return sorted(
+            placeables,
+            key=lambda p: (
+                -max(1, int(getattr(p, "stop_seq", 1) or 1)),
+                getattr(p, "destination_id", "") or "",
+                getattr(p, "customer_id", "") or "",
+                getattr(p, "order_id", "") or "",
+                -(p.length * p.width * p.height),
+            ),
+        )
 
     def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
         sides = ctx.loading_access_sides or ("x_max",)
@@ -151,29 +172,48 @@ class LoadingEfficiency(Objective):
         length = ctx.inner_length or 1.0
         width = ctx.inner_width or 1.0
         height = ctx.inner_height or 1.0
+        has_delivery_stops = ctx.max_stop_seq > ctx.min_stop_seq
+
+        def delivery_score(box: Box) -> tuple[float, float]:
+            nearest_depth = min(_normalized_access_depth(box, side, ctx) for side in sides)
+            if has_delivery_stops:
+                stop_pos = (ctx.current_stop_seq - ctx.min_stop_seq) / (ctx.max_stop_seq - ctx.min_stop_seq)
+                station_score = abs(nearest_depth - stop_pos)
+            else:
+                station_score = 0.0
+            return (station_score, _delivery_cluster_score(ctx, box))
 
         def score(box: Box) -> tuple[float, ...]:
             x, y, z, dx, dy, dz = box
             area = dx * dy
             cx = abs((x + dx / 2.0) - ctx.inner_length / 2.0) / length
             cy = abs((y + dy / 2.0) - ctx.inner_width / 2.0) / width
+            station_score, cluster_score = delivery_score(box)
 
             if single_side in {"x_min", "x_max"}:
                 depth = _access_depth(box, single_side, ctx) / length
                 lateral = cy
-                return (z, -depth, lateral, x, y, -area)
+                if has_delivery_stops:
+                    return (z, station_score, cluster_score, lateral, x, y, -area)
+                return (z, -depth, lateral, cluster_score, x, y, -area)
 
             if single_side in {"y_min", "y_max"}:
                 depth = _access_depth(box, single_side, ctx) / width
-                return (z, depth, cx, x, y, -area)
+                if has_delivery_stops:
+                    return (z, station_score, cluster_score, cx, x, y, -area)
+                return (z, depth, cx, cluster_score, x, y, -area)
 
             if single_side == "z_max":
                 top_depth = _access_depth(box, "z_max", ctx) / height
-                return (z, cx + cy, top_depth, -area, x, y)
+                if has_delivery_stops:
+                    return (z, station_score, cluster_score, cx + cy, top_depth, -area, x, y)
+                return (z, cx + cy, top_depth, cluster_score, -area, x, y)
 
             nearest = min(_normalized_access_depth(box, side, ctx) for side in sides)
             nearest_side = min(sides, key=lambda side: _normalized_access_depth(box, side, ctx))
-            return (z, nearest, _side_rank(nearest_side), cx + cy, x, y, -area)
+            if has_delivery_stops:
+                return (z, station_score, cluster_score, _side_rank(nearest_side), cx + cy, x, y, -area)
+            return (z, nearest, _side_rank(nearest_side), cx + cy, cluster_score, x, y, -area)
 
         return score
 
@@ -183,6 +223,38 @@ class LoadingEfficiency(Objective):
 
     def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
         return count_per_pallet >= 2 and load_efficiency >= 0.45
+
+
+def delivery_group_keys(stop_seq: int, customer_id: str, order_id: str) -> list[tuple[str, int, str]]:
+    keys: list[tuple[str, int, str]] = []
+    if customer_id:
+        keys.append(("customer", stop_seq, customer_id))
+    if order_id:
+        keys.append(("order", stop_seq, order_id))
+    return keys
+
+
+def _delivery_cluster_score(ctx: ScoreContext, box: Box) -> float:
+    keys = delivery_group_keys(ctx.current_stop_seq, ctx.current_customer_id, ctx.current_order_id)
+    if not keys:
+        return 0.0
+    x, y, _z, dx, dy, _dz = box
+    bx = x + dx / 2.0
+    by = y + dy / 2.0
+    denom_x = ctx.inner_length or 1.0
+    denom_y = ctx.inner_width or 1.0
+    scores: list[float] = []
+    for key in keys:
+        group = ctx.delivery_groups.get(key)
+        if not group:
+            continue
+        count, sum_x, sum_y = group
+        if count <= 0:
+            continue
+        gx = sum_x / count
+        gy = sum_y / count
+        scores.append(abs(bx - gx) / denom_x + abs(by - gy) / denom_y)
+    return min(scores) if scores else 0.0
 
 
 def _access_depth(box: Box, side: str, ctx: ScoreContext) -> float:
@@ -224,6 +296,7 @@ load_stability = Stability()
 advanced_score = Balanced()
 weight_balance = CenterOfGravity()
 loading_efficiency = LoadingEfficiency()
+multi_customer_delivery = loading_efficiency
 
 _REGISTRY: dict[str, Objective] = {
     "transport_cost": transport_cost,
@@ -236,6 +309,7 @@ _REGISTRY: dict[str, Objective] = {
     "weight_balance": weight_balance,
     "center_of_gravity": weight_balance,
     "loading_efficiency": loading_efficiency,
+    "multi_customer_delivery": multi_customer_delivery,
 }
 
 def get_objective(name: str) -> Objective:

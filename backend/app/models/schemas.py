@@ -18,7 +18,8 @@ ALL_ORIENTATIONS: tuple[Orientation, ...] = ("LWH", "WLH", "LHW", "HWL", "WHL", 
 Objective = Literal[
     "transport_cost", "load_stability", "weight_balance", "loading_efficiency",
     "advanced_score",
-    "max_utilization", "min_containers", "stability", "balanced", "center_of_gravity"
+    "max_utilization", "min_containers", "stability", "balanced", "center_of_gravity",
+    "multi_customer_delivery",
 ]
 StackingType = Literal[
     "not_stackable", "same_item_only", "stackable", "support_only", "top_only"
@@ -40,6 +41,10 @@ class Item(BaseModel):
     # 顶部可承重 kg：None=未指定(无限制)，0=易碎不可压，>0=承重上限。
     max_load_top: Optional[float] = Field(ge=0, default=None)
     category: str = ""
+    customer_id: str = ""
+    order_id: str = ""
+    destination_id: str = ""
+    stop_seq: int = Field(ge=1, default=1)
 
     @model_validator(mode="after")
     def normalize_top_load_for_stacking_type(self):
@@ -94,6 +99,10 @@ class Container(BaseModel):
 class Placement(BaseModel):
     item_id: str
     pallet_id: Optional[str] = None
+    customer_id: str = ""
+    order_id: str = ""
+    destination_id: str = ""
+    stop_seq: int = 1
     x: float
     y: float
     z: float

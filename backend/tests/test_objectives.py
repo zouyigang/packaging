@@ -21,6 +21,7 @@ def test_registry_returns_correct_types():
     assert isinstance(get_objective("load_stability"), Stability)
     assert isinstance(get_objective("weight_balance"), CenterOfGravity)
     assert isinstance(get_objective("loading_efficiency"), LoadingEfficiency)
+    assert get_objective("multi_customer_delivery") is get_objective("loading_efficiency")
     assert isinstance(get_objective("advanced_score"), Balanced)
 
 
