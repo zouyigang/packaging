@@ -67,3 +67,75 @@ def test_ga_min_containers_objective_runs():
     placed = sum(len(c.placements) for c in sol.containers)
     assert placed == 16
     assert sol.unpacked == []
+
+
+def test_ga_advanced_score_uses_weighted_fitness_path():
+    items = [
+        Item(id="a", length=50, width=50, height=50, weight=10, quantity=8),
+        Item(id="b", length=40, width=40, height=40, weight=2, quantity=8, stop_seq=2),
+    ]
+    container = Container(
+        id="c",
+        inner_length=200,
+        inner_width=120,
+        inner_height=120,
+        max_payload=10000,
+        quantity=1,
+    )
+    req = SolveRequest.model_validate({
+        "items": [item.model_dump() for item in items],
+        "containers": [container.model_dump()],
+        "objective": "advanced_score",
+        "use_ga": True,
+        "advanced_weights": {
+            "space_utilization": 0.3,
+            "stability": 0.25,
+            "palletization": 0.05,
+            "balance": 0.25,
+            "loading_position": 0.15,
+        },
+    })
+    sol = solve_ga(req, FAST)
+    placed = sum(len(c.placements) for c in sol.containers)
+    assert placed > 0
+    assert len(sol.unpacked) < sum(item.quantity for item in items)
+
+
+def test_ga_returns_ranked_unique_alternatives():
+    items = [
+        Item(id="a", length=300, width=200, height=200, quantity=8),
+        Item(id="b", length=250, width=250, height=150, quantity=8),
+        Item(id="c", length=180, width=160, height=120, quantity=10),
+    ]
+    container = Container(
+        id="c",
+        inner_length=1200,
+        inner_width=800,
+        inner_height=700,
+        max_payload=100000,
+        quantity=1,
+    )
+    req = SolveRequest(items=items, containers=[container], objective="advanced_score", use_ga=True, candidate_count=3)
+    sol = solve_ga(req, GAConfig(population=18, generations=6, seed=7))
+
+    assert sol.evaluation is not None
+    assert len(sol.alternatives) <= 2
+    assert len(sol.alternatives) > 0
+    assert all(alt.evaluation is not None for alt in sol.alternatives)
+    assert all(alt.rank >= 2 for alt in sol.alternatives)
+    assert [alt.score for alt in sol.alternatives] == sorted(
+        [alt.score for alt in sol.alternatives],
+        reverse=True,
+    )
+
+    signatures = {_placement_signature(sol)}
+    signatures.update(_placement_signature(alt) for alt in sol.alternatives)
+    assert len(signatures) == len(sol.alternatives) + 1
+
+
+def _placement_signature(sol):
+    return tuple(
+        (ci, loaded.id, p.seq, p.item_id, p.x, p.y, p.z, p.orientation)
+        for ci, loaded in enumerate(sol.containers)
+        for p in loaded.placements
+    )

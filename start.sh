@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# 一键启动后端(8000) + 前端(5173)。用法：bash start.sh （Git Bash / WSL）
+# 一键启动后端(8000) + 前端(5173)。用法：bash start.sh（Git Bash / WSL）
 set -e
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "启动后端 http://127.0.0.1:8000 ..."
@@ -15,6 +19,6 @@ fi
 ( cd "$root/frontend" && npm run dev ) &
 frontend_pid=$!
 
-# Ctrl+C 时一并关闭两个进程
+# Ctrl+C 时一并关闭两个进程。
 trap 'kill $backend_pid $frontend_pid 2>/dev/null' INT TERM
 wait

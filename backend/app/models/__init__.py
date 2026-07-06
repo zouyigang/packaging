@@ -5,6 +5,7 @@ from .schemas import (
     Placement,
     LoadedContainer,
     Solution,
+    SolutionAlternative,
     SolveRequest,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "Placement",
     "LoadedContainer",
     "Solution",
+    "SolutionAlternative",
     "SolveRequest",
 ]

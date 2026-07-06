@@ -117,9 +117,60 @@ class LoadedContainer(BaseModel):
     weight_utilization: float = 0.0
 
 
+class ContainerEvaluation(BaseModel):
+    index: int
+    id: str
+    score: float = Field(ge=0, le=100)
+    grade: str
+    metrics: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class Evaluation(BaseModel):
+    objective: str
+    score: float = Field(ge=0, le=100)
+    grade: str
+    metrics: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    containers: list[ContainerEvaluation] = Field(default_factory=list)
+
+
 class Solution(BaseModel):
     containers: list[LoadedContainer] = Field(default_factory=list)
     unpacked: list[str] = Field(default_factory=list)
+    evaluation: Optional[Evaluation] = None
+    alternatives: list["SolutionAlternative"] = Field(default_factory=list)
+
+
+class SolutionAlternative(BaseModel):
+    rank: int = Field(ge=1)
+    seed: int
+    score: float = Field(ge=0, le=100)
+    grade: str
+    containers: list[LoadedContainer] = Field(default_factory=list)
+    unpacked: list[str] = Field(default_factory=list)
+    evaluation: Optional[Evaluation] = None
+
+
+
+class AdvancedWeights(BaseModel):
+    space_utilization: float = Field(ge=0, default=0.35)
+    stability: float = Field(ge=0, default=0.25)
+    palletization: float = Field(ge=0, default=0.15)
+    balance: float = Field(ge=0, default=0.15)
+    loading_position: float = Field(ge=0, default=0.10)
+
+    @model_validator(mode="after")
+    def require_some_weight(self):
+        if (
+            self.space_utilization
+            + self.stability
+            + self.palletization
+            + self.balance
+            + self.loading_position
+        ) <= 0:
+            raise ValueError("at least one advanced weight must be positive")
+        return self
 
 
 class SolveRequest(BaseModel):
@@ -127,4 +178,6 @@ class SolveRequest(BaseModel):
     pallets: list[Pallet] = Field(default_factory=list)
     containers: list[Container] = Field(default_factory=list)
     objective: Objective = "transport_cost"
+    advanced_weights: Optional[AdvancedWeights] = None
     use_ga: bool = False  # True 时用遗传算法对放置顺序做全局优化（更慢，更优）
+    candidate_count: int = Field(ge=1, le=8, default=3)

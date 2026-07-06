@@ -1,13 +1,14 @@
 ﻿# 一键启动：分别在两个新 PowerShell 窗口里拉起后端和前端。
 # 用法：在项目根目录执行  .\start.ps1
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $root 'scripts\set-utf8.ps1')
 
 Start-Process powershell -ArgumentList @(
-    "-NoExit", "-ExecutionPolicy", "Bypass",
+    "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
     "-File", "`"$root\scripts\start-backend.ps1`""
 )
 Start-Process powershell -ArgumentList @(
-    "-NoExit", "-ExecutionPolicy", "Bypass",
+    "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
     "-File", "`"$root\scripts\start-frontend.ps1`""
 )
 

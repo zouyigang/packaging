@@ -1,6 +1,7 @@
 ﻿# 启动前端（Vite 开发服务器），监听 5173，已配 /api -> 后端 8000 代理。
 # 首次会自动 npm install。用法：.\scripts\start-frontend.ps1
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'set-utf8.ps1')
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location (Join-Path $root "frontend")
 

@@ -43,6 +43,15 @@ class ScoreContext:
     delivery_groups: dict[tuple[str, int, str], tuple[float, float, float]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AdvancedScoreWeights:
+    space_utilization: float = 0.35
+    stability: float = 0.25
+    palletization: float = 0.15
+    balance: float = 0.15
+    loading_position: float = 0.10
+
+
 class Objective:
     """目标基类。默认策略：放置靠底→靠里→靠左；容器顺序不变。"""
 
@@ -109,13 +118,51 @@ class Stability(Objective):
 
 
 class Balanced(Objective):
-    """综合平衡：以低位放置为主，兼顾靠里靠左（M2 暂等同默认策略，后续可加权）。"""
+    """显式加权综合评分：空间紧凑、稳定、重心均衡、装卸位置与托盘化收益。"""
 
     name = "balanced"
 
+    def __init__(self, weights: AdvancedScoreWeights | None = None):
+        self.weights = weights or AdvancedScoreWeights()
+
+    def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
+        length = ctx.inner_length or 1.0
+        width = ctx.inner_width or 1.0
+        height = ctx.inner_height or 1.0
+        footprint = length * width or 1.0
+        weights = self.weights
+
+        def score(box: Box) -> tuple[float, ...]:
+            x, y, z, dx, dy, dz = box
+            space_score = _space_compaction_score(box, length, width, height)
+            stability_score = _stability_score(box, footprint, height)
+            balance_score = _balance_score(ctx, box, length, width)
+            loading_score = _loading_position_score(ctx, box)
+
+            weighted = (
+                weights.space_utilization * space_score
+                + weights.stability * stability_score
+                + weights.balance * balance_score
+                + weights.loading_position * loading_score
+            )
+            return (weighted, z / height, x / length, y / width)
+
+        return score
+
+    def placement_score(self, box: Box) -> tuple[float, ...]:
+        x, y, z, dx, dy, dz = box
+        volume = max(dx * dy * dz, 1.0)
+        area = max(dx * dy, 1.0)
+        compactness = z + y + x
+        stability = z + dz / area
+        return (0.6 * compactness + 0.4 * stability, z, -volume)
+
     def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
-        # 折中：仅当码托盘的体积开销不大（满托盘填充率够高）且能成块时才码。
-        return count_per_pallet >= 2 and load_efficiency >= 0.6
+        if count_per_pallet < 2:
+            return False
+        count_score = min(count_per_pallet / 8.0, 1.0)
+        pallet_score = 0.65 * load_efficiency + 0.35 * count_score
+        return pallet_score >= 0.40 + self.weights.palletization
 
 
 class CenterOfGravity(Objective):
@@ -133,6 +180,7 @@ class CenterOfGravity(Objective):
         cy = ctx.inner_width / 2.0
         length = ctx.inner_length or 1.0
         width = ctx.inner_width or 1.0
+        height = ctx.inner_height or 1.0
 
         def score(box: Box) -> tuple[float, ...]:
             x, y, z, dx, dy, _dz = box
@@ -144,9 +192,56 @@ class CenterOfGravity(Objective):
             gy = (ctx.sum_wy + m * by) / nw
             norm_x = abs(gx - cx) / length
             norm_y = abs(gy - cy) / width
-            return (z, max(norm_x, norm_y), norm_x + norm_y, x, y)
+            height_penalty = 0.60 * (z / height)
+            compactness_penalty = 0.08 * ((x + dx) / length + (y + dy) / width)
+            return (
+                max(norm_x, norm_y) + height_penalty + compactness_penalty,
+                norm_x + norm_y + height_penalty + compactness_penalty,
+                z,
+                x,
+                y,
+            )
 
         return score
+
+
+def _space_compaction_score(box: Box, length: float, width: float, height: float) -> float:
+    x, y, z, dx, dy, dz = box
+    top = (z + dz) / height
+    front = (x + dx) / length
+    side = (y + dy) / width
+    low = z / height
+    return 0.45 * top + 0.25 * front + 0.20 * side + 0.10 * low
+
+
+def _stability_score(box: Box, footprint: float, height: float) -> float:
+    _x, _y, z, dx, dy, dz = box
+    base_ratio = min((dx * dy) / footprint, 1.0)
+    center_height = (z + dz / 2.0) / height
+    slenderness = dz / max(dx, dy, 1.0)
+    return 0.50 * center_height + 0.35 * (1.0 - base_ratio) + 0.15 * min(slenderness, 1.0)
+
+
+def _balance_score(ctx: ScoreContext, box: Box, length: float, width: float) -> float:
+    x, y, z, dx, dy, dz = box
+    mass = ctx.unit_w if ctx.unit_w > 0 else dx * dy * dz
+    total = ctx.total_w + mass
+    if total <= 0:
+        return 0.0
+    gx = (ctx.sum_wx + mass * (x + dx / 2.0)) / total
+    gy = (ctx.sum_wy + mass * (y + dy / 2.0)) / total
+    norm_x = abs(gx - length / 2.0) / length
+    norm_y = abs(gy - width / 2.0) / width
+    return max(norm_x, norm_y) + norm_x + norm_y
+
+
+def _loading_position_score(ctx: ScoreContext, box: Box) -> float:
+    sides = ctx.loading_access_sides or ("x_max",)
+    nearest_depth = min(_normalized_access_depth(box, side, ctx) for side in sides)
+    if ctx.max_stop_seq > ctx.min_stop_seq:
+        stop_pos = (ctx.current_stop_seq - ctx.min_stop_seq) / (ctx.max_stop_seq - ctx.min_stop_seq)
+        return abs(nearest_depth - stop_pos) + _delivery_cluster_score(ctx, box)
+    return 1.0 - nearest_depth
 
 
 class LoadingEfficiency(Objective):
@@ -194,25 +289,25 @@ class LoadingEfficiency(Objective):
                 depth = _access_depth(box, single_side, ctx) / length
                 lateral = cy
                 if has_delivery_stops:
-                    return (z, station_score, cluster_score, lateral, x, y, -area)
+                    return (station_score, cluster_score, lateral, z, x, y, -area)
                 return (z, -depth, lateral, cluster_score, x, y, -area)
 
             if single_side in {"y_min", "y_max"}:
                 depth = _access_depth(box, single_side, ctx) / width
                 if has_delivery_stops:
-                    return (z, station_score, cluster_score, cx, x, y, -area)
+                    return (station_score, cluster_score, cx, z, x, y, -area)
                 return (z, depth, cx, cluster_score, x, y, -area)
 
             if single_side == "z_max":
                 top_depth = _access_depth(box, "z_max", ctx) / height
                 if has_delivery_stops:
-                    return (z, station_score, cluster_score, cx + cy, top_depth, -area, x, y)
+                    return (station_score, cluster_score, cx + cy, z, top_depth, -area, x, y)
                 return (z, cx + cy, top_depth, cluster_score, -area, x, y)
 
             nearest = min(_normalized_access_depth(box, side, ctx) for side in sides)
             nearest_side = min(sides, key=lambda side: _normalized_access_depth(box, side, ctx))
             if has_delivery_stops:
-                return (z, station_score, cluster_score, _side_rank(nearest_side), cx + cy, x, y, -area)
+                return (station_score, cluster_score, _side_rank(nearest_side), cx + cy, z, x, y, -area)
             return (z, nearest, _side_rank(nearest_side), cx + cy, cluster_score, x, y, -area)
 
         return score
@@ -312,8 +407,27 @@ _REGISTRY: dict[str, Objective] = {
     "multi_customer_delivery": multi_customer_delivery,
 }
 
-def get_objective(name: str) -> Objective:
+def get_objective(name: str, advanced_weights: Any | None = None) -> Objective:
+    if name in {"advanced_score", "balanced"} and advanced_weights is not None:
+        return Balanced(_coerce_advanced_weights(advanced_weights))
     try:
         return _REGISTRY[name]
     except KeyError as exc:
         raise ValueError(f"未知优化目标: {name!r}，可选: {sorted(_REGISTRY)}") from exc
+
+
+def _coerce_advanced_weights(value: Any) -> AdvancedScoreWeights:
+    if isinstance(value, AdvancedScoreWeights):
+        return value
+    if hasattr(value, "model_dump"):
+        data = value.model_dump()
+    else:
+        data = dict(value)
+    defaults = AdvancedScoreWeights()
+    return AdvancedScoreWeights(
+        space_utilization=float(data.get("space_utilization", defaults.space_utilization)),
+        stability=float(data.get("stability", defaults.stability)),
+        palletization=float(data.get("palletization", defaults.palletization)),
+        balance=float(data.get("balance", defaults.balance)),
+        loading_position=float(data.get("loading_position", defaults.loading_position)),
+    )

@@ -24,6 +24,23 @@ def test_loading_efficiency_delivery_places_later_stop_deeper_and_sequences_firs
     assert _access_depth_x_max(placements["late"], late, container) > _access_depth_x_max(placements["early"], early, container)
 
 
+def test_loading_efficiency_scores_better_than_default_for_stop_depth():
+    items = [
+        Item(id="early", length=100, width=100, height=100, stop_seq=1, customer_id="A"),
+        Item(id="late", length=100, width=100, height=100, stop_seq=2, customer_id="B"),
+    ]
+    container = Container(
+        id="c", inner_length=300, inner_width=100, inner_height=100,
+        max_payload=1000, loading_accesses=[{"side": "x_max"}],
+    )
+
+    default = solve(SolveRequest(items=items, containers=[container], objective="transport_cost"))
+    loading = solve(SolveRequest(items=items, containers=[container], objective="loading_efficiency"))
+
+    assert loading.evaluation.metrics["loading_score"] >= default.evaluation.metrics["loading_score"]
+    assert loading.evaluation.containers[0].metrics["loading_score"] >= default.evaluation.containers[0].metrics["loading_score"]
+
+
 def test_loading_efficiency_delivery_keeps_customer_and_order_metadata_on_placements():
     item = Item(
         id="box", length=50, width=50, height=50, quantity=1,

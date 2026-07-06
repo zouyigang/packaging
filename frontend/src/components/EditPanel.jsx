@@ -1,4 +1,4 @@
-import { Select, Button, Alert, Divider, Space, Switch, Tooltip } from 'antd'
+import { Select, Button, Alert, Divider, Space, Switch, Tooltip, Slider } from 'antd'
 import EditableTable from './EditableTable'
 import { useStore } from '../store/useStore'
 
@@ -95,14 +95,28 @@ const OBJECTIVES = [
   { label: '高级模式', options: ADVANCED_OBJECTIVES },
 ]
 const FLAT_OBJECTIVES = [...PRODUCTION_OBJECTIVES, ...ADVANCED_OBJECTIVES]
+const ADVANCED_WEIGHT_FIELDS = [
+  { key: 'space_utilization', label: '空间利用' },
+  { key: 'stability', label: '稳定性' },
+  { key: 'palletization', label: '托盘化' },
+  { key: 'balance', label: '重心均衡' },
+  { key: 'loading_position', label: '装卸位置' },
+]
 
 function objectiveMeta(value) {
   return FLAT_OBJECTIVES.find((item) => item.value === value) || PRODUCTION_OBJECTIVES[0]
 }
 
+function isAdvancedObjective(value) {
+  return value === 'advanced_score' || value === 'balanced'
+}
+
 export default function EditPanel() {
   const objective = useStore((s) => s.objective)
   const setObjective = useStore((s) => s.setObjective)
+  const advancedWeights = useStore((s) => s.advancedWeights)
+  const setAdvancedWeight = useStore((s) => s.setAdvancedWeight)
+  const resetAdvancedWeights = useStore((s) => s.resetAdvancedWeights)
   const solve = useStore((s) => s.solve)
   const loading = useStore((s) => s.loading)
   const error = useStore((s) => s.error)
@@ -143,6 +157,32 @@ export default function EditPanel() {
             <strong>{selectedObjective.label}</strong>
             <span>{selectedObjective.description}</span>
           </div>
+          {isAdvancedObjective(objective) && (
+            <div className="advanced-weights">
+              <div className="advanced-weights-head">
+                <strong>权重</strong>
+                <Button size="small" onClick={resetAdvancedWeights}>恢复默认</Button>
+              </div>
+              <div className="advanced-weight-list">
+                {ADVANCED_WEIGHT_FIELDS.map((field) => {
+                  const value = advancedWeights[field.key] ?? 0
+                  return (
+                    <label className="advanced-weight-row" key={field.key}>
+                      <span className="advanced-weight-label">{field.label}</span>
+                      <Slider
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={Math.round(value * 100)}
+                        onChange={(nextValue) => setAdvancedWeight(field.key, nextValue / 100)}
+                      />
+                      <span className="advanced-weight-value">{Math.round(value * 100)}%</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          )}
           <div className="solve-actions">
             <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
               <Space size={6}>

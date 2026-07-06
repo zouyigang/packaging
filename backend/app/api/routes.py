@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter
 
-from ..core.ga import solve_ga
+from ..core.ga import GAConfig, solve_ga
 from ..core.packer import solve
 from ..models.schemas import Solution, SolveRequest
 
@@ -26,4 +28,6 @@ def solve_endpoint(request: SolveRequest) -> Solution:
     use_ga=True 时用遗传算法对放置顺序做全局优化（更慢但通常更优）。
     前端拿到每个容器的 placements 后，按 seq 排序即可做装箱顺序回放。
     """
-    return solve_ga(request) if request.use_ga else solve(request)
+    if request.use_ga:
+        return solve_ga(request, GAConfig(seed=secrets.randbits(32)))
+    return solve(request)

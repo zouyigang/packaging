@@ -15,8 +15,7 @@ export function orientedDims(length, width, height, orientation) {
   return [dims[idx[0]], dims[idx[1]], dims[idx[2]]]
 }
 
-// 按 category 稳定生成一个颜色（HSL），同类同色。
-// 用黄金角(137.5°)散布色相，避免相邻类别（如 'A'/'B'）色相只差 1° 而看不出区别。
+// 按 key 稳定生成颜色。同客户同一基础色，同客户不同货品只做轻微变化。
 function hashKey(value) {
   const key = String(value || 'default')
   let hash = 0
@@ -30,18 +29,40 @@ function hueForKey(value) {
   return Math.round((hashKey(value) * 137.508) % 360)
 }
 
+const CUSTOMER_PALETTE = [
+  { hue: 204, saturation: 58, lightness: 68 }, // soft blue
+  { hue: 138, saturation: 48, lightness: 66 }, // soft green
+  { hue: 344, saturation: 58, lightness: 72 }, // soft rose
+  { hue: 48, saturation: 62, lightness: 70 }, // soft yellow
+  { hue: 178, saturation: 50, lightness: 66 }, // soft teal
+  { hue: 260, saturation: 34, lightness: 74 }, // pale lavender
+  { hue: 112, saturation: 46, lightness: 68 }, // soft leaf
+]
+
+function customerBaseColor(customerId) {
+  return CUSTOMER_PALETTE[hashKey(customerId) % CUSTOMER_PALETTE.length]
+}
+
+export function colorForCustomer(customerId) {
+  const base = customerBaseColor(customerId)
+  return `hsl(${base.hue}, ${base.saturation}%, ${base.lightness}%)`
+}
+
 export function colorForCategory(category) {
-  return `hsl(${hueForKey(category)}, 65%, 52%)`
+  return `hsl(${hueForKey(category)}, 58%, 60%)`
 }
 
 export function colorForItem(item) {
   if (!item?.customer_id) return colorForCategory(item?.category)
 
-  const baseHue = hueForKey(item.customer_id)
-  const variant = hashKey(item.id || item.name || item.category) % 7
-  const hueOffset = [-5, -3, -1, 0, 2, 4, 6][variant]
-  const saturation = [62, 66, 70, 64, 68, 72, 65][variant]
-  const lightness = [47, 51, 55, 49, 53, 57, 45][variant]
-  const hue = (baseHue + hueOffset + 360) % 360
+  const base = customerBaseColor(item.customer_id)
+  const itemKey = item.id || item.name || item.category || item.customer_id
+  const itemHash = hashKey(`${item.customer_id}:${itemKey}`)
+  const hueOffset = (Math.round((itemHash * 137.508) % 360) % 81) - 40
+  const saturationOffset = ((Math.floor(itemHash / 81) % 5) - 2) * 4
+  const lightnessOffset = ((Math.floor(itemHash / 405) % 5) - 2) * 4
+  const hue = (base.hue + hueOffset + 360) % 360
+  const saturation = Math.max(38, Math.min(64, base.saturation + saturationOffset))
+  const lightness = Math.max(56, Math.min(78, base.lightness + lightnessOffset))
   return `hsl(${hue}, ${saturation}%, ${lightness}%)`
 }

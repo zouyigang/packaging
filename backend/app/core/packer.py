@@ -30,6 +30,7 @@ from .constraints import (
     check_stacking_type,
     commit_stack_load,
 )
+from .evaluator import evaluate_solution
 from .extreme_point import find_placement
 from .geometry import box_volume
 from .objectives import Objective, ScoreContext, delivery_group_keys, get_objective
@@ -228,6 +229,7 @@ def _pack_placeables_into_container(
     placed_items: list[PlacedItem] = []
     leftover: list[_Placeable] = []
     placement_boxes: list[tuple[Placement, tuple[float, float, float, float, float, float]]] = []
+    balance_boxes: list[tuple[tuple[float, float, float, float, float, float], float]] = []
     seq = 0
     used_volume = 0.0
     used_weight = 0.0
@@ -330,6 +332,7 @@ def _pack_placeables_into_container(
         emitted = pl.emit(px, py, pz, cand.orientation, start_seq=seq)
         loaded.placements.extend(emitted)
         placement_boxes.extend((p, cand.box) for p in emitted)
+        balance_boxes.append((cand.box, pl.weight))
         seq += len(emitted)
         commit_stack_load(cand.box, pl.weight, placed_items)
         placed_items.append(PlacedItem(
@@ -359,10 +362,45 @@ def _pack_placeables_into_container(
     loaded.weight_utilization = (
         used_weight / container.max_payload if container.max_payload else 0.0
     )
+    if objective.name == "center_of_gravity":
+        _center_loaded_container(loaded, placement_boxes, balance_boxes, container)
     _resequence_inside_to_outside(
         loaded, placement_boxes, container, objective.name in {"loading_efficiency", "multi_customer_delivery"}
     )
     return loaded, leftover
+
+
+def _center_loaded_container(
+    loaded: LoadedContainer,
+    placement_boxes: list[tuple[Placement, tuple[float, float, float, float, float, float]]],
+    balance_boxes: list[tuple[tuple[float, float, float, float, float, float], float]],
+    container: Container,
+) -> None:
+    if not balance_boxes:
+        return
+    min_x = min(box[0] for box, _mass in balance_boxes)
+    min_y = min(box[1] for box, _mass in balance_boxes)
+    max_x = max(box[0] + box[3] for box, _mass in balance_boxes)
+    max_y = max(box[1] + box[4] for box, _mass in balance_boxes)
+    total_mass = sum(mass if mass > 0 else box_volume(box) for box, mass in balance_boxes)
+    if total_mass <= 0:
+        return
+    gx = sum((mass if mass > 0 else box_volume(box)) * (box[0] + box[3] / 2.0) for box, mass in balance_boxes) / total_mass
+    gy = sum((mass if mass > 0 else box_volume(box)) * (box[1] + box[4] / 2.0) for box, mass in balance_boxes) / total_mass
+    shift_x = _clamp_shift(container.inner_length / 2.0 - gx, -min_x, container.inner_length - max_x)
+    shift_y = _clamp_shift(container.inner_width / 2.0 - gy, -min_y, container.inner_width - max_y)
+    if abs(shift_x) <= EPS and abs(shift_y) <= EPS:
+        return
+    for placement in loaded.placements:
+        placement.x += shift_x
+        placement.y += shift_y
+    for index, (placement, box) in enumerate(placement_boxes):
+        x, y, z, dx, dy, dz = box
+        placement_boxes[index] = (placement, (x + shift_x, y + shift_y, z, dx, dy, dz))
+
+
+def _clamp_shift(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
 def _update_delivery_groups(ctx: ScoreContext, pl: _Placeable, center_x: float, center_y: float) -> None:
@@ -525,7 +563,9 @@ def run_container_loop(
 
 def solve(request: SolveRequest) -> Solution:
     """多容器求解主循环：决策码托盘 → 自动开箱直到货品装完或容器用尽。"""
-    objective = get_objective(request.objective)
+    objective = get_objective(request.objective, request.advanced_weights)
     placeables = _build_placeables(request, objective)  # 已按大块先排序
     containers = _expand_containers(request, objective)
-    return run_container_loop(placeables, containers, objective)
+    solution = run_container_loop(placeables, containers, objective)
+    solution.evaluation = evaluate_solution(request, solution)
+    return solution

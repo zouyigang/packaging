@@ -2,7 +2,7 @@ import { Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Swit
 import { DeleteOutlined, EditOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 import { useStore } from '../store/useStore'
-import { colorForCategory } from '../three/geometry'
+import { colorForCustomer } from '../three/geometry'
 
 const ORIENTATION_ORDER = ['LWH', 'WLH', 'LHW', 'HLW', 'WHL', 'HWL']
 const TOP_LOAD_LOCKED_STACKING_TYPES = new Set(['not_stackable', 'top_only'])
@@ -47,7 +47,6 @@ export default function EditableTable({ kind, title, fields }) {
   const [addingRow, setAddingRow] = useState(null)
 
   const editingRow = rows.find((row) => row.id === editingId) || null
-  const displayRows = sortResourceRows(kind, rows)
 
   const handleAddClick = () => {
     setAddingRow(createBlankRow(kind))
@@ -77,7 +76,7 @@ export default function EditableTable({ kind, title, fields }) {
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
         </div>
       ) : (
-        displayRows.map((row) => (
+        rows.map((row) => (
           <ResourceRow
             key={row.id}
             row={row}
@@ -140,7 +139,7 @@ export default function EditableTable({ kind, title, fields }) {
 }
 
 function customerAccent(customerName) {
-  const color = colorForCategory(customerName)
+  const color = colorForCustomer(customerName)
   const match = /^hsl\((\d+),\s*[^,]+,\s*[^)]+\)$/.exec(color)
   if (!match) {
     return { line: color, text: color, border: color, background: '#f8fafc' }
@@ -157,39 +156,16 @@ function normalizeCustomer(value) {
   return String(value ?? '').trim()
 }
 
-function sortResourceRows(kind, rows) {
-  if (kind !== 'items') return rows
-
-  const groupStops = new Map()
-  for (const row of rows) {
-    const customer = normalizeCustomer(row.customer_id)
-    if (!customer) continue
-    const stopSeq = Number(row.stop_seq) || 1
-    groupStops.set(customer, Math.min(groupStops.get(customer) ?? stopSeq, stopSeq))
-  }
-
-  return [...rows].sort((a, b) => {
-    const customerA = normalizeCustomer(a.customer_id)
-    const customerB = normalizeCustomer(b.customer_id)
-    if (!!customerA !== !!customerB) return customerA ? -1 : 1
-
-    if (customerA && customerB) {
-      const groupStopDiff = (groupStops.get(customerA) ?? 1) - (groupStops.get(customerB) ?? 1)
-      if (groupStopDiff !== 0) return groupStopDiff
-      const customerDiff = customerA.localeCompare(customerB, 'zh-Hans-CN')
-      if (customerDiff !== 0) return customerDiff
-    }
-
-    const stopDiff = (Number(a.stop_seq) || 1) - (Number(b.stop_seq) || 1)
-    if (stopDiff !== 0) return stopDiff
-    return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-Hans-CN')
-  })
-}
 function ResourceRow({ row, fields, kind, onEdit, onRemove }) {
   const title = row.name || row.id
   const summary = getSummary(row, fields)
   const chips = getChips(row, fields)
-  const customerName = kind === 'items' ? normalizeCustomer(row.customer_id) : ''
+  const isItem = kind === 'items'
+  const customerName = isItem ? normalizeCustomer(row.customer_id) : ''
+  const rawStopSeq = Number(row.stop_seq)
+  const stopSeq = isItem && row.stop_seq !== '' && row.stop_seq !== null && row.stop_seq !== undefined && Number.isFinite(rawStopSeq)
+    ? Math.max(1, rawStopSeq)
+    : null
   const accent = customerName ? customerAccent(customerName) : null
 
   return (
@@ -205,7 +181,12 @@ function ResourceRow({ row, fields, kind, onEdit, onRemove }) {
       <button type="button" onClick={onEdit} className="resource-row-main">
         <div className="resource-row-title">
           <strong>{title}</strong>
-          {customerName && <span className="resource-customer-badge">客户: {customerName}</span>}
+          {isItem && (
+            <span className="resource-row-meta">
+              {customerName && <span className="resource-customer-badge">客户: {customerName}</span>}
+              <span className={`resource-stop-badge${stopSeq === null ? ' resource-stop-badge-empty' : ''}`}>{stopSeq !== null ? `卸货: ${stopSeq}` : ''}</span>
+            </span>
+          )}
         </div>
         <div className="resource-summary">{summary || '-'}</div>
         {chips.length > 0 && (

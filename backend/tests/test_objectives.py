@@ -1,11 +1,13 @@
 import pytest
 
 from app.core.objectives import (
+    AdvancedScoreWeights,
     Balanced,
     CenterOfGravity,
     LoadingEfficiency,
     MaxUtilization,
     MinContainers,
+    ScoreContext,
     Stability,
     get_objective,
 )
@@ -30,11 +32,51 @@ def test_unknown_objective_raises():
         get_objective("nope")
 
 
-def test_default_score_prefers_low_back_left():
+def test_balanced_score_prefers_low_positions():
     obj = Balanced()
     low = obj.placement_score((0, 0, 0, 10, 10, 10))
     high = obj.placement_score((0, 0, 50, 10, 10, 10))
     assert low < high
+
+
+def test_balanced_weighted_score_offsets_existing_imbalance():
+    obj = Balanced()
+    ctx = ScoreContext(
+        inner_length=100,
+        inner_width=100,
+        inner_height=100,
+        unit_w=10,
+        total_w=10,
+        sum_wx=100,
+        sum_wy=500,
+        loading_access_sides=("z_max",),
+    )
+    scorer = obj.make_scorer(ctx)
+
+    stays_left = scorer((0, 40, 0, 20, 20, 20))
+    pulls_right = scorer((80, 40, 0, 20, 20, 20))
+
+    assert pulls_right < stays_left
+
+
+def test_balanced_pallet_score_allows_dense_multi_item_loads():
+    obj = Balanced()
+    assert obj.should_palletize(load_efficiency=0.5, count_per_pallet=8) is True
+    assert obj.should_palletize(load_efficiency=0.5, count_per_pallet=1) is False
+    assert obj.should_palletize(load_efficiency=0.3, count_per_pallet=2) is False
+
+
+def test_get_objective_applies_advanced_weights():
+    obj = get_objective("advanced_score", {"palletization": 0.6})
+    assert isinstance(obj, Balanced)
+    assert obj.weights == AdvancedScoreWeights(
+        space_utilization=0.35,
+        stability=0.25,
+        palletization=0.6,
+        balance=0.15,
+        loading_position=0.10,
+    )
+    assert get_objective("advanced_score").weights.palletization == 0.15
 
 
 def test_stability_prefers_larger_base_at_same_height():

@@ -1,76 +1,130 @@
 # 3D 装箱 / 容器装载系统
 
-一个 3D 装箱（Container Loading）系统：录入「货品 / 托盘 / 容器」的信息与数量，
-由启发式算法给出装箱方案，并在前端做 **3D 可视化 + 装箱顺序逐步回放**。
+一个 3D 装箱（Container Loading）系统：录入「货品 / 托盘 / 容器」的信息与数量，由启发式算法给出装箱方案，并在前端做 3D/2D 可视化、装箱顺序回放、客户与货品筛选、CSV 报表导出。
 
-3D 装箱属 NP-hard，本项目采用「极点启发式 + 可选遗传算法(BRKGA)」求高质量近似解。
+3D 装箱属 NP-hard，本项目采用「极点启发式 + 可选遗传算法（BRKGA）」求高质量近似解。算法支持多容器、多目标、托盘化、堆叠约束、重心评估、多客户配送和卸货顺序。
 
 ## 功能特性
 
 - **多容器自动分配**：按录入的容器类型与数量自动开箱装载，装不下的进入余货清单。
-- **可插拔优化目标**（运行时切换）：最大空间利用率 / 最少容器数 / 稳定性优先 / 综合平衡。
-- **直接装 vs 码托盘决策**：托盘是算法的可选手段，按当前目标对每件/每批货品择优，不写死流程。
-- **完整物理约束**：不越界/不重叠、容器载重上限、堆叠承重（易碎品不被压）、防悬空支撑、朝向限制。
-- **GA 全局优化**（可选）：以放置顺序为基因、极点启发式为解码器，进一步提升装载质量。
-- **可视化**：3D 场景 + 按 `seq` 的顺序回放、2D 俯视装载图、CSV 报表导出。
+- **可插拔优化目标**：支持运输成本优先、装载稳定优先、重心均衡优先、装卸/多客户配送优先、综合评分等策略。
+- **多客户配送与卸货顺序**：货品可配置客户、订单、目的地、卸货顺序；装卸策略会按入口和卸货顺序安排位置，并尽量聚集同客户/订单货品。
+- **直接装 vs 码托盘决策**：托盘是算法的可选资源，按当前目标对货品择优决定直接装箱或先码托盘再装箱。
+- **完整物理约束**：不越界、不重叠、容器载重上限、堆叠承重、不可压货、同品堆叠、上层/下层限制、防悬空支撑、朝向限制。
+- **装货入口配置**：容器可配置后门、前门、左右侧门、顶部吊装等入口，影响装载位置评分和回放顺序。
+- **GA 全局优化**：可选 BRKGA，以放置顺序为基因、极点启发式为解码器，进一步提升装载质量。
+- **3D/2D 可视化**：3D 场景、2D 俯视图、托盘底板、重心标记、按 `seq` 的顺序回放。
+- **客户/货品联动筛选**：装载视图支持客户筛选和二级货品筛选；客户按卸货顺序排列，货品选项随客户联动。
+- **货品卡片信息增强**：左侧货品卡片显示客户、卸货顺序、同客户色系标识；不同货品在同客户色系下有轻微色差，便于识别。
+- **弹窗式新增/编辑**：货品、托盘、容器新增时先弹窗编辑，确认后回填；编辑复用同一套字段控件。
+- **CSV 导出**：导出每个放置项的容器、顺序、货品、托盘、客户、订单、目的地、卸货顺序、位置、朝向和尺寸。
+- **内置测试数据**：页面默认加载一组多客户、多货品、托盘和 20GP 容器数据，刷新或重启前端后可直接测试。
 
 ## 技术栈
 
-- 后端：FastAPI + Pydantic + NumPy，装箱引擎纯 Python、可独立测试。
+- 后端：FastAPI + Pydantic + NumPy，装箱引擎纯 Python，可独立测试。
 - 前端：React + Vite + react-three-fiber + Ant Design + zustand。
 
 ## 快速开始
 
-### 前置条件（需自行安装）
-- **Anaconda / Miniconda**（提供 `conda` 命令，用于后端 Python 环境）。
-- **Node.js ≥ 18**（自带 `npm`，用于前端）。
-  在终端执行 `conda --version`、`node -v`、`npm -v` 能打印版本即说明已就绪。
+### Docker 一键启动（推荐）
 
-### 首次安装（从 git 拉取代码后）
-
-> 下面假设已 `git clone` 并进入项目根目录（含 `backend/`、`frontend/` 两个子目录）。
-
-#### 1) 后端：创建 conda 环境并安装依赖
+只需要本机已安装 Docker，无需安装 conda、Python、Node.js 或 npm。
 
 ```bash
-# 在项目根目录执行。创建名为 packaging 的环境（Python 3.12）
+docker compose up --build
+```
+
+如果构建时依赖下载较慢或失败，可临时指定镜像源后再启动：
+
+```powershell
+$env:PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+$env:NPM_REGISTRY="https://registry.npmmirror.com"
+docker compose up --build
+```
+
+启动后打开：
+
+```text
+http://localhost:8000
+```
+
+如需后台运行：
+
+```bash
+docker compose up -d --build
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+也可以不用 Compose，直接构建并运行镜像：
+
+```bash
+docker build -t packaging-app .
+docker run --rm -p 8000:8000 packaging-app
+```
+
+### 本地开发前置条件
+
+- Anaconda / Miniconda：提供 `conda` 命令，用于后端 Python 环境。
+- Node.js >= 18：提供 `node` 和 `npm`，用于前端。
+
+可先执行以下命令确认：
+
+```bash
+conda --version
+node -v
+npm -v
+```
+
+### 首次安装
+
+假设已经 `git clone` 并进入项目根目录。
+
+#### 1. 后端环境
+
+```bash
 conda create -n packaging python=3.12 -y
+conda activate packaging
 
-# 激活环境
-conda activate packaging        # 若提示未初始化，先执行 conda init 后重开终端
-
-# 安装后端三方包（fastapi / uvicorn / pydantic / numpy / pytest / httpx）
 cd backend
 pip install -r requirements.txt
 cd ..
 ```
 
-> 环境名可自取，但**必须叫 `packaging`**才能直接用本仓库的启动脚本（脚本里写死了 `-n packaging`）；
-> 若用别的名字，请相应改 `scripts/*.ps1`、`start.sh` 里的环境名，或改用「手动启动」里激活环境后的命令。
+如果使用其他 conda 环境名，需要同步修改 `scripts/*.ps1` 和 `start.sh` 中的环境名，或使用手动启动命令。
 
-验证后端依赖装好：
+验证后端依赖：
 
 ```bash
-conda run -n packaging python -m pytest backend -q      # 应显示全部测试通过
+conda run -n packaging python -m pytest backend -q
 ```
 
-#### 2) 前端：安装 node 依赖
+#### 2. 前端依赖
 
 ```bash
 cd frontend
-npm install            # 读取 package.json，生成 node_modules（首次较慢，需联网）
+npm install
 cd ..
 ```
 
-> 国内网络慢可临时换源：`npm install --registry=https://registry.npmmirror.com`。
+国内网络较慢时可临时使用镜像：
 
-装好后即可用下面任意方式启动。
+```bash
+npm install --registry=https://registry.npmmirror.com
+```
+
+## 启动
 
 ### 一键启动
 
 ```powershell
-# Windows PowerShell（项目根目录）
-.\start.ps1        # 在两个新窗口分别拉起后端(8000) 与 前端(5173)
+# Windows PowerShell，项目根目录
+.\start.ps1
 ```
 
 ```bash
@@ -78,96 +132,228 @@ cd ..
 bash start.sh
 ```
 
-启动后浏览器打开 **http://localhost:5173**，页面自带一组示例数据，直接点「求解装箱」即可。
+启动后打开：
 
-### 分别启动 / 手动启动
+```text
+http://localhost:5173
+```
+
+页面会加载默认测试数据，可直接点击「求解装箱」。
+
+### 分别启动
 
 ```powershell
-.\scripts\start-backend.ps1     # 仅后端
-.\scripts\start-frontend.ps1    # 仅前端（首次自动 npm install）
+.\scripts\start-backend.ps1
+.\scripts\start-frontend.ps1
 ```
 
 ```bash
 # 后端
 cd backend
 conda run --no-capture-output -n packaging uvicorn app.main:app --port 8000 --reload
-# 前端（另开终端）
+
+# 前端，另开终端
 cd frontend
-npm install        # 首次
+npm install
 npm run dev
 ```
 
-> 前端开发服务器把 `/api/*` 代理到后端 `http://127.0.0.1:8000`（见 `frontend/vite.config.js`），无需额外处理跨域。
+前端开发服务器会把 `/api/*` 代理到 `http://127.0.0.1:8000`，配置见 `frontend/vite.config.js`。
 
-### 常见问题
+## 使用流程
 
-- **`conda activate` 报 "not initialized"**：先执行 `conda init`（PowerShell 用 `conda init powershell`），关闭并重开终端再试。
-- **`conda` / `npm` 找不到命令**：未装或未加入 PATH，确认前置条件已安装。
-- **端口被占用**：后端默认 8000、前端默认 5173。先关掉占用进程，或改端口（后端 `--port`，前端 `npm run dev -- --port 5174` 并相应改 `vite.config.js` 代理目标）。
-- **页面点「求解装箱」无反应/报错**：多半是后端没起或端口不对。确认后端窗口在跑、能访问 http://127.0.0.1:8000/health 返回 `{"status":"ok"}`。
-- **Windows 下 `.ps1` 脚本不让运行**：用 `powershell -ExecutionPolicy Bypass -File .\start.ps1`，或对当前用户放开：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+1. 在左侧维护货品、托盘、容器。点击「新增」会打开弹窗，确认后写入列表。
+2. 货品可配置尺寸、重量、数量、堆叠类型、可摆放姿态、客户、订单、目的地、卸货顺序。
+3. 容器可配置尺寸、载重、数量和装货入口。
+4. 选择装箱策略。多客户配送场景建议使用「装卸/多客户配送优先」。
+5. 可按需要打开「GA 优化」，质量可能更高但耗时更长。
+6. 点击「求解装箱」。
+7. 在右侧 3D 或 2D 视图查看结果，使用底部回放和容器切换控件检查顺序。
+8. 使用顶部「客户筛选」和「货品筛选」查看特定客户或货品的装载位置。
+9. 点击「导出 CSV」下载装载明细。
 
-## 使用
+## 默认测试数据
 
-1. 在左侧表格编辑货品 / 托盘 / 容器及数量。
-2. 选择优化目标；如需更优解可打开「GA 优化」开关（更慢）。
-3. 点「求解装箱」。
-4. 右侧查看 **3D** 装载结果，用底部滑块或「回放」按 `seq` 逐步播放；多容器用分段器切换。
-5. 切到 **2D 俯视** 看俯视装载图；点「导出 CSV」下载报表。
+前端默认数据用于快速验证多客户配送和筛选：
+
+- 货品：
+  - 大箱A：600 x 400 x 400，数量 8，客户「甲」，卸货 1，独立放置。
+  - 小箱B：400 x 300 x 300，数量 120，客户「甲」，卸货 1，可上下堆放。
+  - 新货品：500 x 400 x 230，数量 300，客户「乙」，卸货 2，可上下堆放。
+- 托盘：标准托盘 1200 x 1000，数量 4，自重 10，限重 1000，限高 1500。
+- 容器：20GP，5900 x 2350 x 2390，数量 2，载重 28000，后门装货。
+
+新增货品的卸货顺序默认为空；卡片上不会显示卸货标签。求解前会把空卸货顺序按后端默认值 `1` 处理。
 
 ## 接口
 
-`POST /solve`（另有 `GET /health`，文档见 `/docs`）
+### `GET /health`
 
-请求体：
+健康检查，返回：
+
 ```json
-{ "items": [], "pallets": [], "containers": [], "objective": "max_utilization", "use_ga": false }
-```
-响应体：
-```json
-{ "containers": [ { "id": "...", "placements": [ { "item_id": "...", "pallet_id": null,
-  "x": 0, "y": 0, "z": 0, "orientation": "LWH", "seq": 1 } ],
-  "volume_utilization": 0.0, "weight_utilization": 0.0 } ], "unpacked": [] }
+{ "status": "ok" }
 ```
 
-单位：尺寸 mm、重量 kg。坐标系原点在容器内一个底角，x=长、y=宽、z=高(向上)。
+### `POST /solve`
+
+请求体示例：
+
+```json
+{
+  "items": [
+    {
+      "id": "box-A",
+      "name": "大箱A",
+      "length": 600,
+      "width": 400,
+      "height": 400,
+      "weight": 20,
+      "quantity": 8,
+      "allowed_rotations": ["LWH", "WLH"],
+      "stackable": false,
+      "stacking_type": "not_stackable",
+      "max_load_top": 0,
+      "category": "A",
+      "customer_id": "甲",
+      "order_id": "",
+      "destination_id": "",
+      "stop_seq": 1
+    }
+  ],
+  "pallets": [
+    {
+      "id": "plt",
+      "name": "标准托盘",
+      "length": 1200,
+      "width": 1000,
+      "tare_weight": 10,
+      "deck_height": 150,
+      "max_stack_height": 1500,
+      "max_load": 1000,
+      "quantity": 4
+    }
+  ],
+  "containers": [
+    {
+      "id": "cntr",
+      "name": "20GP",
+      "inner_length": 5900,
+      "inner_width": 2350,
+      "inner_height": 2390,
+      "max_payload": 28000,
+      "quantity": 2,
+      "loading_accesses": [
+        { "side": "x_max" }
+      ]
+    }
+  ],
+  "objective": "loading_efficiency",
+  "use_ga": false
+}
+```
+
+`objective` 可用值包括：
+
+- `transport_cost`
+- `load_stability`
+- `weight_balance`
+- `loading_efficiency`
+- `multi_customer_delivery`（等价于 `loading_efficiency`）
+- `advanced_score`
+- 兼容别名：`max_utilization`、`min_containers`、`stability`、`balanced`、`center_of_gravity`
+
+响应体示例：
+
+```json
+{
+  "containers": [
+    {
+      "id": "cntr",
+      "placements": [
+        {
+          "item_id": "box-A",
+          "pallet_id": null,
+          "customer_id": "甲",
+          "order_id": "",
+          "destination_id": "",
+          "stop_seq": 1,
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "length": 600,
+          "width": 400,
+          "height": 400,
+          "orientation": "LWH",
+          "seq": 1
+        }
+      ],
+      "volume_utilization": 0.0,
+      "weight_utilization": 0.0
+    }
+  ],
+  "unpacked": []
+}
+```
+
+单位：尺寸使用同一长度单位，重量 kg。坐标原点在容器内部一个底角，x=长，y=宽，z=高（向上）。
 
 ## 测试
 
 ```bash
-conda run -n packaging python -m pytest backend -q     # 64 个单元测试
+conda run -n packaging python -m pytest backend -q
 ```
+
+当前后端测试数：96。
+
+前端构建验证：
+
+```bash
+cd frontend
+npm run build
+```
+
+Vite 可能提示 bundle 大小超过 500 kB，这是当前依赖体积导致的构建警告，不影响功能。
 
 ## 目录结构
 
-```
+```text
 backend/
   app/
-    main.py            FastAPI 入口（create_app + CORS）
-    api/routes.py      POST /solve · GET /health
+    main.py            FastAPI 入口
+    api/routes.py      POST /solve、GET /health
     models/schemas.py  Pydantic 数据模型
     core/
-      geometry.py      朝向→尺寸、AABB 越界/重叠
+      geometry.py      朝向、尺寸、AABB 几何
       space.py         极点集合
-      extreme_point.py 极点放置 + 评分
-      constraints.py   支撑/堆叠承重校验
-      objectives.py    可插拔优化目标（策略）
-      palletizer.py    码托盘逻辑与「直接装 vs 码托盘」决策
+      extreme_point.py 极点放置与评分
+      constraints.py   支撑、堆叠、承重约束
+      objectives.py    可插拔优化目标和多客户配送评分
+      palletizer.py    码托盘逻辑与直接装/码托盘决策
       packer.py        多容器编排主循环
       ga.py            BRKGA 全局优化
-  tests/               引擎单元测试
+  tests/               后端单元测试
 frontend/
   src/
-    components/        编辑表格、结果/回放面板、2D 俯视
-    three/             3D 场景 + 朝向几何
-    store/             zustand 状态
-    api/ utils/        调用 /solve、CSV 导出
-start.ps1 / start.sh   一键启动
+    App.jsx            顶部视图切换、客户/货品筛选、导出入口
+    components/        编辑面板、资源卡片、结果/回放面板、2D 俯视图
+    three/             3D 场景、货品颜色、朝向几何
+    store/             zustand 状态与默认测试数据
+    api/               /solve 调用
+    utils/             CSV 导出、客户/货品筛选工具
+start.ps1 / start.sh   一键启动脚本
 scripts/               分项启动脚本
-CLAUDE.md              设计说明与里程碑进度
+CLAUDE.md              设计说明与里程碑记录
 ```
+
+## 常见问题
+
+- `conda activate` 提示未初始化：先执行 `conda init`，PowerShell 用 `conda init powershell`，关闭并重开终端。
+- `conda` 或 `npm` 找不到：确认已经安装并加入 PATH。
+- 端口占用：后端默认 8000，前端默认 5173。关闭占用进程，或修改启动端口和 Vite 代理配置。
+- 点击「求解装箱」无响应：确认后端正在运行，并访问 `http://127.0.0.1:8000/health` 返回 `{"status":"ok"}`。
+- Windows 不允许运行 `.ps1`：使用 `powershell -ExecutionPolicy Bypass -File .\start.ps1`，或执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
 
 ## 状态
 
-里程碑 M1~M7 全部完成（引擎 + 约束 + 码托盘 + REST + 3D/2D 可视化 + GA），端到端可用。
-后续可增强：GA 朝向基因、传递式承重、门洞约束、大算例性能优化。
+当前已完成：多容器装载、物理约束、托盘化、REST API、3D/2D 可视化、GA 优化、多客户配送、客户/货品筛选、CSV 导出和默认测试数据。后续可继续增强：更细的门洞约束、大算例性能优化、GA 朝向基因、更多报表维度。

@@ -5,8 +5,12 @@
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .api import router
 
@@ -28,7 +32,17 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(router, prefix="/api")
+    _mount_frontend(app)
     return app
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    """Serve the Vite production build when it is present in the runtime image."""
+
+    dist_dir = Path(os.environ.get("PACKAGING_FRONTEND_DIST", "/app/frontend-dist"))
+    if (dist_dir / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=dist_dir, html=True), name="frontend")
 
 
 app = create_app()
