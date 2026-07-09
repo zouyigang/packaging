@@ -35,6 +35,12 @@ class ExtremePointSet:
             if not self._contains(c, eps):
                 self._points.append(c)
 
+    def prune_covered(self, box: Box, eps: float = 1e-6) -> int:
+        """删除最小角已经落入 box 占用空间内的极点。"""
+        before = len(self._points)
+        self._points = [point for point in self._points if not _point_starts_inside_box(point, box, eps)]
+        return before - len(self._points)
+
     def _contains(self, point: Point, eps: float) -> bool:
         return any(
             abs(point[0] - p[0]) <= eps
@@ -42,3 +48,16 @@ class ExtremePointSet:
             and abs(point[2] - p[2]) <= eps
             for p in self._points
         )
+
+
+def _point_starts_inside_box(point: Point, box: Box, eps: float = 1e-6) -> bool:
+    px, py, pz = point
+    x, y, z, dx, dy, dz = box
+    return (
+        px >= x - eps
+        and py >= y - eps
+        and pz >= z - eps
+        and px < x + dx - eps
+        and py < y + dy - eps
+        and pz < z + dz - eps
+    )

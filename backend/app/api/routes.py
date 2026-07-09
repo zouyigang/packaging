@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import secrets
 
 from fastapi import APIRouter
@@ -14,6 +15,7 @@ from ..core.packer import solve
 from ..models.schemas import Solution, SolveRequest
 
 router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
 
 
 @router.get("/health", tags=["meta"])
@@ -29,5 +31,22 @@ def solve_endpoint(request: SolveRequest) -> Solution:
     前端拿到每个容器的 placements 后，按 seq 排序即可做装箱顺序回放。
     """
     if request.use_ga:
-        return solve_ga(request, GAConfig(seed=secrets.randbits(32)))
-    return solve(request)
+        solution = solve_ga(request, GAConfig.for_speed(request.ga_speed, seed=secrets.randbits(32)))
+    else:
+        solution = solve(request)
+    _log_performance(request, solution)
+    return solution
+
+
+def _log_performance(request: SolveRequest, solution: Solution) -> None:
+    perf = solution.performance
+    if perf is None:
+        return
+    logger.info(
+        "solve completed mode=%s objective=%s runtime_ms=%.3f stages_ms=%s counters=%s",
+        "ga" if request.use_ga else "heuristic",
+        request.objective,
+        perf.runtime_ms,
+        perf.stages_ms,
+        perf.counters,
+    )

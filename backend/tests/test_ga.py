@@ -58,6 +58,80 @@ def test_ga_empty_request():
     assert sol.unpacked == []
 
 
+def test_ga_reports_performance_metrics():
+    item = Item(id="a", length=50, width=50, height=50, quantity=8)
+    container = Container(
+        id="c",
+        inner_length=100,
+        inner_width=100,
+        inner_height=100,
+        max_payload=10000,
+        quantity=1,
+    )
+    sol = solve_ga(SolveRequest(items=[item], containers=[container]), FAST)
+    assert sol.performance is not None
+    assert sol.performance.runtime_ms >= 0
+    assert "ga_initial_population" in sol.performance.stages_ms
+    assert "ga_generation_1" in sol.performance.stages_ms
+    assert sol.performance.counters["ga_decode_cache_hits"] > 0
+    assert sol.performance.counters["ga_decode_cache_misses"] > 0
+
+
+def test_ga_speed_profiles_scale_budget():
+    fast = GAConfig.for_speed("fast", seed=1)
+    standard = GAConfig.for_speed("standard", seed=1)
+    fine = GAConfig.for_speed("fine", seed=1)
+
+    assert fast.population < standard.population < fine.population
+    assert fast.generations < standard.generations < fine.generations
+    assert fast.early_stop_rounds < standard.early_stop_rounds < fine.early_stop_rounds
+    assert standard.seed == 1
+
+
+def test_ga_early_stop_reports_completed_generations():
+    item = Item(id="a", length=50, width=50, height=50, quantity=8)
+    container = Container(
+        id="c",
+        inner_length=100,
+        inner_width=100,
+        inner_height=100,
+        max_payload=10000,
+        quantity=1,
+    )
+    cfg = GAConfig(population=8, generations=20, seed=1, early_stop_rounds=1)
+    sol = solve_ga(SolveRequest(items=[item], containers=[container]), cfg)
+
+    assert sol.performance is not None
+    assert sol.performance.counters["ga_early_stopped"] == 1
+    assert sol.performance.counters["ga_generations_completed"] < cfg.generations
+
+
+def test_ga_parallel_decode_matches_single_process():
+    items = [
+        Item(id="a", length=300, width=200, height=200, quantity=8),
+        Item(id="b", length=250, width=200, height=150, quantity=8),
+    ]
+    container = Container(
+        id="c",
+        inner_length=1200,
+        inner_width=800,
+        inner_height=600,
+        max_payload=100000,
+        quantity=1,
+    )
+    req = SolveRequest(items=items, containers=[container], objective="advanced_score", use_ga=True)
+    serial = solve_ga(req, GAConfig(population=8, generations=2, seed=9, parallel_workers=0))
+    parallel = solve_ga(
+        req,
+        GAConfig(population=8, generations=2, seed=9, parallel_workers=2, parallel_min_population=1),
+    )
+
+    assert _placement_signature(parallel) == _placement_signature(serial)
+    assert parallel.performance is not None
+    assert parallel.performance.counters["ga_parallel_workers"] == 2
+    assert parallel.performance.counters["ga_parallel_tasks"] > 0
+
+
 def test_ga_min_containers_objective_runs():
     items = [Item(id="a", length=50, width=50, height=50, quantity=16)]
     small = Container(id="s", inner_length=100, inner_width=100, inner_height=100,

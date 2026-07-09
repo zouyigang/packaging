@@ -139,25 +139,21 @@ def _placement_infos(
 
 
 def _base_metrics(request: SolveRequest, solution: Solution, infos: list[_PlacementInfo]) -> dict[str, float]:
+    item_volume_map = {item.id: item.length * item.width * item.height for item in request.items}
+    container_volume_map = {
+        container.id: container.inner_length * container.inner_width * container.inner_height
+        for container in request.containers
+    }
+    container_payload_map = {container.id: container.max_payload for container in request.containers}
     total_volume = sum(item.length * item.width * item.height * item.quantity for item in request.items)
     total_weight = sum(item.weight * item.quantity for item in request.items)
     loaded_volume = sum(info.volume for info in infos)
     loaded_weight = sum(info.item.weight for info in infos)
-    unpacked_volume = sum(_item_volume(item_id, request.items) for item_id in solution.unpacked)
+    unpacked_volume = sum(item_volume_map.get(item_id, 0.0) for item_id in solution.unpacked)
     available_volume = sum(c.inner_length * c.inner_width * c.inner_height * c.quantity for c in request.containers)
     available_payload = sum(c.max_payload * c.quantity for c in request.containers)
-    used_volume = sum(
-        c.inner_length * c.inner_width * c.inner_height
-        for loaded in solution.containers
-        for c in request.containers
-        if c.id == loaded.id
-    )
-    used_payload = sum(
-        c.max_payload
-        for loaded in solution.containers
-        for c in request.containers
-        if c.id == loaded.id
-    )
+    used_volume = sum(container_volume_map.get(loaded.id, 0.0) for loaded in solution.containers)
+    used_payload = sum(container_payload_map.get(loaded.id, 0.0) for loaded in solution.containers)
 
     loaded_completion = _ratio(loaded_volume, total_volume)
     available_fit_ratio = _ratio(loaded_volume, min_positive(total_volume, available_volume))
@@ -186,8 +182,9 @@ def _container_evaluations(
     objective: str,
 ) -> list[ContainerEvaluation]:
     evaluations: list[ContainerEvaluation] = []
+    infos_by_container = _infos_by_container_index(infos)
     for container_index, loaded in enumerate(solution.containers):
-        container_infos = [info for info in infos if info.container_index == container_index]
+        container_infos = infos_by_container.get(container_index, [])
         metrics = _container_metrics(container_infos)
         score = _weighted_score(metrics, profile)
         evaluations.append(ContainerEvaluation(
@@ -268,8 +265,9 @@ def _balance_score(solution: Solution, infos: list[_PlacementInfo]) -> float:
     if not solution.containers:
         return 1.0
     penalties: list[float] = []
+    infos_by_container = _infos_by_container_index(infos)
     for container_index, _loaded in enumerate(solution.containers):
-        container_infos = [info for info in infos if info.container_index == container_index]
+        container_infos = infos_by_container.get(container_index, [])
         total_mass = sum(info.mass for info in container_infos)
         if total_mass <= 0 or not container_infos:
             continue
@@ -286,8 +284,9 @@ def _balance_score_from_infos(infos: list[_PlacementInfo]) -> float:
     if not infos:
         return 1.0
     penalties: list[float] = []
-    for container_index in sorted({info.container_index for info in infos}):
-        container_infos = [info for info in infos if info.container_index == container_index]
+    infos_by_container = _infos_by_container_index(infos)
+    for container_index in sorted(infos_by_container):
+        container_infos = infos_by_container[container_index]
         total_mass = sum(info.mass for info in container_infos)
         if total_mass <= 0 or not container_infos:
             continue
@@ -298,6 +297,13 @@ def _balance_score_from_infos(infos: list[_PlacementInfo]) -> float:
         norm_y = abs(gy - container.inner_width / 2.0) / container.inner_width
         penalties.append(min(max(norm_x, norm_y) + norm_x + norm_y, 1.0))
     return _clamp(1.0 - (sum(penalties) / len(penalties) if penalties else 0.0))
+
+
+def _infos_by_container_index(infos: list[_PlacementInfo]) -> dict[int, list[_PlacementInfo]]:
+    grouped: dict[int, list[_PlacementInfo]] = {}
+    for info in infos:
+        grouped.setdefault(info.container_index, []).append(info)
+    return grouped
 
 
 def _loading_score(infos: list[_PlacementInfo]) -> float:
@@ -371,11 +377,6 @@ def _grade(score: float) -> str:
     if score >= 60:
         return "C"
     return "D"
-
-
-def _item_volume(item_id: str, items: list[Item]) -> float:
-    item = next((candidate for candidate in items if candidate.id == item_id), None)
-    return item.length * item.width * item.height if item else 0.0
 
 
 def _ratio(numerator: float, denominator: float) -> float:

@@ -21,6 +21,7 @@ Objective = Literal[
     "max_utilization", "min_containers", "stability", "balanced", "center_of_gravity",
     "multi_customer_delivery",
 ]
+GASpeed = Literal["fast", "standard", "fine"]
 StackingType = Literal[
     "not_stackable", "same_item_only", "stackable", "support_only", "top_only"
 ]
@@ -135,10 +136,17 @@ class Evaluation(BaseModel):
     containers: list[ContainerEvaluation] = Field(default_factory=list)
 
 
+class PerformanceMetrics(BaseModel):
+    runtime_ms: float = Field(ge=0, default=0.0)
+    stages_ms: dict[str, float] = Field(default_factory=dict)
+    counters: dict[str, int] = Field(default_factory=dict)
+
+
 class Solution(BaseModel):
     containers: list[LoadedContainer] = Field(default_factory=list)
     unpacked: list[str] = Field(default_factory=list)
     evaluation: Optional[Evaluation] = None
+    performance: Optional[PerformanceMetrics] = None
     alternatives: list["SolutionAlternative"] = Field(default_factory=list)
 
 
@@ -180,4 +188,5 @@ class SolveRequest(BaseModel):
     objective: Objective = "transport_cost"
     advanced_weights: Optional[AdvancedWeights] = None
     use_ga: bool = False  # True 时用遗传算法对放置顺序做全局优化（更慢，更优）
+    ga_speed: GASpeed = "standard"
     candidate_count: int = Field(ge=1, le=8, default=3)

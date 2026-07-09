@@ -51,10 +51,17 @@ def _contact_area(box: Box, other: Box) -> float:
 
 def supporters(box: Box, placed: list[PlacedItem]) -> list[tuple[PlacedItem, float]]:
     """返回直接支撑 box 的 (下方箱, 接触面积) 列表；box 在地面则返回空。"""
+    return supporters_from_candidates(box, placed)
+
+
+def supporters_from_candidates(
+    box: Box,
+    candidates: list[PlacedItem],
+) -> list[tuple[PlacedItem, float]]:
     if box[2] <= EPS:
         return []
     out: list[tuple[PlacedItem, float]] = []
-    for pi in placed:
+    for pi in candidates:
         area = _contact_area(box, pi.box)
         if area > EPS:
             out.append((pi, area))
@@ -64,15 +71,26 @@ def supporters(box: Box, placed: list[PlacedItem]) -> list[tuple[PlacedItem, flo
 def check_support(box: Box, placed: list[PlacedItem],
                   min_support_ratio: float = DEFAULT_SUPPORT_RATIO) -> bool:
     """箱体是否被充分支撑（地面或下方箱顶接触面积比例达标）。"""
-    if box[2] <= EPS:  # 贴地
+    return check_support_from_supporters(box, supporters(box, placed), min_support_ratio)
+
+
+def check_support_from_supporters(
+    box: Box,
+    sups: list[tuple[PlacedItem, float]],
+    min_support_ratio: float = DEFAULT_SUPPORT_RATIO,
+) -> bool:
+    if box[2] <= EPS:
         return True
-    total = sum(area for _pi, area in supporters(box, placed))
+    total = sum(area for _pi, area in sups)
     return total / _base_area(box) >= min_support_ratio - EPS
 
 
 def check_stack_load(box: Box, weight: float, placed: list[PlacedItem]) -> bool:
     """新箱(重 weight)压在支撑箱上，按接触面积分摊后不得超各支撑箱 max_load_top。"""
-    sups = supporters(box, placed)
+    return check_stack_load_from_supporters(weight, supporters(box, placed))
+
+
+def check_stack_load_from_supporters(weight: float, sups: list[tuple[PlacedItem, float]]) -> bool:
     total_area = sum(a for _pi, a in sups)
     if total_area <= EPS:
         return True  # 地面承重，无上限
@@ -92,7 +110,15 @@ def check_stacking_type(
     placed: list[PlacedItem],
 ) -> bool:
     """Validate vertical stacking compatibility with direct supporters."""
-    sups = supporters(box, placed)
+    return check_stacking_type_from_supporters(box, item_id, stacking_type, supporters(box, placed))
+
+
+def check_stacking_type_from_supporters(
+    box: Box,
+    item_id: str,
+    stacking_type: str,
+    sups: list[tuple[PlacedItem, float]],
+) -> bool:
     if box[2] <= EPS:
         return stacking_type != "top_only"
     if not sups:
@@ -127,9 +153,17 @@ def _can_support(stacking_type: str, supporter_id: str, item_id: str) -> bool:
 
 def check_heavy_low(box: Box, weight: float, placed: list[PlacedItem]) -> bool:
     """Reject placing a heavier item directly on top of lighter support items."""
+    return check_heavy_low_from_supporters(box, weight, supporters(box, placed))
+
+
+def check_heavy_low_from_supporters(
+    box: Box,
+    weight: float,
+    sups: list[tuple[PlacedItem, float]],
+) -> bool:
     if box[2] <= EPS:
         return True
-    return all(weight <= pi.weight + EPS for pi, _area in supporters(box, placed))
+    return all(weight <= pi.weight + EPS for pi, _area in sups)
 
 
 def check_cog_within_limits(

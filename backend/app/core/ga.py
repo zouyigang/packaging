@@ -5,11 +5,13 @@ responsible for decoding each ordered individual into a concrete solution.
 """
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from os import cpu_count
 
 import numpy as np
 
-from ..models.schemas import Container, Item, Solution, SolutionAlternative, SolveRequest
+from ..models.schemas import Container, Item, PerformanceMetrics, Solution, SolutionAlternative, SolveRequest
 from .evaluator import evaluate_solution
 from .geometry import oriented_dims
 from .objectives import AdvancedScoreWeights, get_objective
@@ -19,6 +21,11 @@ from .packer import (
     _expand_containers,
     run_container_loop,
 )
+from .performance import PerformanceTimer
+
+_GA_WORKER_PLACEABLES: list[_Placeable] | None = None
+_GA_WORKER_CONTAINERS: list[Container] | None = None
+_GA_WORKER_OBJECTIVE: object | None = None
 
 
 @dataclass
@@ -29,6 +36,63 @@ class GAConfig:
     mutant_frac: float = 0.20
     inherit_prob: float = 0.70
     seed: int = 0
+    early_stop_rounds: int | None = None
+    parallel_workers: int = 0
+    parallel_min_population: int = 24
+
+    @classmethod
+    def for_speed(cls, speed: str, seed: int = 0) -> "GAConfig":
+        if speed == "fast":
+            return cls(
+                population=16,
+                generations=12,
+                seed=seed,
+                early_stop_rounds=4,
+                parallel_workers=_default_parallel_workers(),
+                parallel_min_population=8,
+            )
+        if speed == "fine":
+            return cls(
+                population=64,
+                generations=60,
+                seed=seed,
+                early_stop_rounds=12,
+                parallel_workers=_default_parallel_workers(),
+            )
+        return cls(
+            population=32,
+            generations=30,
+            seed=seed,
+            early_stop_rounds=8,
+            parallel_workers=_default_parallel_workers(),
+        )
+
+
+def _default_parallel_workers() -> int:
+    cores = cpu_count() or 1
+    return max(0, min(cores - 1, 4))
+
+
+def _init_ga_decode_worker(
+    placeables: list[_Placeable],
+    containers: list[Container],
+    objective: object,
+) -> None:
+    global _GA_WORKER_PLACEABLES, _GA_WORKER_CONTAINERS, _GA_WORKER_OBJECTIVE
+    _GA_WORKER_PLACEABLES = placeables
+    _GA_WORKER_CONTAINERS = containers
+    _GA_WORKER_OBJECTIVE = objective
+
+
+def _decode_ga_order_worker(
+    order: tuple[int, ...],
+) -> tuple[tuple[int, ...], Solution, dict[str, float], dict[str, int]]:
+    if _GA_WORKER_PLACEABLES is None or _GA_WORKER_CONTAINERS is None or _GA_WORKER_OBJECTIVE is None:
+        raise RuntimeError("GA worker is not initialized")
+    timer = PerformanceTimer()
+    ordered = [_GA_WORKER_PLACEABLES[i] for i in order]
+    solution = run_container_loop(ordered, _GA_WORKER_CONTAINERS, _GA_WORKER_OBJECTIVE, timer)
+    return order, solution, timer.stages_ms, timer.counters
 
 
 def _cargo_volume(item: Item) -> float:
@@ -246,22 +310,36 @@ def _rank_ga_candidates(
 
 def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     """Search placeable order with BRKGA and return the best decoded solution."""
+    timer = PerformanceTimer()
     cfg = config or GAConfig()
-    objective = get_objective(request.objective, request.advanced_weights)
-    placeables: list[_Placeable] = _build_placeables(request, objective)
-    containers = _expand_containers(request, objective)
-    item_map = {i.id: i for i in request.items}
-    container_map = {c.id: c for c in request.containers}
-    fitness = _make_fitness(request.objective, item_map, container_map, getattr(objective, "weights", None))
+    with timer.stage("prepare_objective"):
+        objective = get_objective(request.objective, request.advanced_weights)
+    with timer.stage("build_placeables"):
+        placeables: list[_Placeable] = _build_placeables(request, objective)
+    with timer.stage("expand_containers"):
+        containers = _expand_containers(request, objective)
+    with timer.stage("prepare_fitness"):
+        item_map = {i.id: i for i in request.items}
+        container_map = {c.id: c for c in request.containers}
+        fitness = _make_fitness(request.objective, item_map, container_map, getattr(objective, "weights", None))
 
     m = len(placeables)
     if m == 0:
-        solution = run_container_loop([], containers, objective)
-        solution.evaluation = evaluate_solution(request, solution)
+        with timer.stage("container_loop"):
+            solution = run_container_loop([], containers, objective, timer)
+        with timer.stage("evaluator"):
+            solution.evaluation = evaluate_solution(request, solution)
+        solution.performance = PerformanceMetrics(
+            runtime_ms=round(timer.runtime_ms, 3),
+            stages_ms=timer.rounded_stages(),
+            counters=timer.counters,
+        )
         return solution
 
     candidate_limit = max(1, min(request.candidate_count, 8))
     candidates: dict[tuple, tuple[Solution, float]] = {}
+    parallel_workers = cfg.parallel_workers if cfg.population >= cfg.parallel_min_population else 0
+    parallel_workers = min(parallel_workers, cfg.population)
 
     rng = np.random.default_rng(cfg.seed)
     pop = rng.random((cfg.population, m))
@@ -269,16 +347,52 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
 
     n_elite = max(1, int(cfg.population * cfg.elite_frac))
     n_mutant = max(1, int(cfg.population * cfg.mutant_frac))
+    decode_cache: dict[tuple[int, ...], tuple[Solution, float]] = {}
+    executor: ProcessPoolExecutor | None = None
 
-    def decode(keys: np.ndarray) -> Solution:
-        order = np.argsort(keys, kind="stable")
+    def decode(order: tuple[int, ...]) -> Solution:
         ordered = [placeables[i] for i in order]
-        return run_container_loop(ordered, containers, objective)
+        return run_container_loop(ordered, containers, objective, timer)
+
+    def decode_misses(orders: list[tuple[int, ...]]) -> None:
+        if executor is None:
+            for order in orders:
+                sol = decode(order)
+                score = float(fitness(sol))
+                decode_cache[order] = (sol, score)
+            return
+        timer.count("ga_parallel_batches")
+        timer.count("ga_parallel_tasks", len(orders))
+        chunksize = max(1, len(orders) // (parallel_workers * 2))
+        for order, sol, stages_ms, counters in executor.map(_decode_ga_order_worker, orders, chunksize=chunksize):
+            timer.merge(stages_ms, counters)
+            score = float(fitness(sol))
+            decode_cache[order] = (sol, score)
 
     def evaluate(population: np.ndarray) -> tuple[list[Solution], np.ndarray]:
-        sols = [decode(ind) for ind in population]
-        scores = np.array([fitness(s) for s in sols])
-        return sols, scores
+        orders: list[tuple[int, ...]] = []
+        missing_orders: list[tuple[int, ...]] = []
+        missing_seen: set[tuple[int, ...]] = set()
+        for ind in population:
+            order = tuple(int(i) for i in np.argsort(ind, kind="stable"))
+            orders.append(order)
+            if order not in decode_cache and order not in missing_seen:
+                timer.count("ga_decode_cache_misses")
+                missing_orders.append(order)
+                missing_seen.add(order)
+        if missing_orders:
+            decode_misses(missing_orders)
+
+        sols: list[Solution] = []
+        scores: list[float] = []
+        for order in orders:
+            cached = decode_cache[order]
+            if order not in missing_seen:
+                timer.count("ga_decode_cache_hits")
+            sol, score = cached
+            sols.append(sol)
+            scores.append(score)
+        return sols, np.array(scores)
 
     def remember(solutions: list[Solution], fitness_scores: np.ndarray) -> None:
         for sol, score in zip(solutions, fitness_scores):
@@ -287,28 +401,63 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
             if current is None or score > current[1]:
                 candidates[signature] = (sol, float(score))
 
-    sols, scores = evaluate(pop)
-    remember(sols, scores)
+    try:
+        if parallel_workers > 1:
+            timer.count("ga_parallel_workers", parallel_workers)
+            executor = ProcessPoolExecutor(
+                max_workers=parallel_workers,
+                initializer=_init_ga_decode_worker,
+                initargs=(placeables, containers, objective),
+            )
 
-    for _ in range(cfg.generations):
-        order = np.argsort(-scores)
-        pop = pop[order]
-        scores = scores[order]
-        sols = [sols[i] for i in order]
-
-        elites = pop[:n_elite]
-        children = [elites]
-        children.append(rng.random((n_mutant, m)))
-        n_cross = cfg.population - n_elite - n_mutant
-        if n_cross > 0:
-            elite_parents = elites[rng.integers(0, n_elite, n_cross)]
-            non_elite_parents = pop[rng.integers(n_elite, cfg.population, n_cross)]
-            mask = rng.random((n_cross, m)) < cfg.inherit_prob
-            crossed = np.where(mask, elite_parents, non_elite_parents)
-            children.append(crossed)
-        pop = np.vstack(children)
-
-        sols, scores = evaluate(pop)
+        with timer.stage("ga_initial_population"):
+            sols, scores = evaluate(pop)
         remember(sols, scores)
+        best_score = float(np.max(scores))
+        stale_generations = 0
+        completed_generations = 0
 
-    return _rank_ga_candidates(request, candidates, candidate_limit, cfg.seed)
+        for generation in range(cfg.generations):
+            with timer.stage(f"ga_generation_{generation + 1}"):
+                order = np.argsort(-scores)
+                pop = pop[order]
+                scores = scores[order]
+                sols = [sols[i] for i in order]
+
+                elites = pop[:n_elite]
+                children = [elites]
+                children.append(rng.random((n_mutant, m)))
+                n_cross = cfg.population - n_elite - n_mutant
+                if n_cross > 0:
+                    elite_parents = elites[rng.integers(0, n_elite, n_cross)]
+                    non_elite_parents = pop[rng.integers(n_elite, cfg.population, n_cross)]
+                    mask = rng.random((n_cross, m)) < cfg.inherit_prob
+                    crossed = np.where(mask, elite_parents, non_elite_parents)
+                    children.append(crossed)
+                pop = np.vstack(children)
+
+                sols, scores = evaluate(pop)
+            remember(sols, scores)
+            completed_generations = generation + 1
+            generation_best = float(np.max(scores))
+            if generation_best > best_score + 1e-9:
+                best_score = generation_best
+                stale_generations = 0
+            else:
+                stale_generations += 1
+            if cfg.early_stop_rounds is not None and stale_generations >= cfg.early_stop_rounds:
+                timer.count("ga_early_stopped")
+                break
+    finally:
+        if executor is not None:
+            executor.shutdown()
+    timer.count("ga_generations_completed", completed_generations)
+
+    with timer.stage("rank_candidates"):
+        solution = _rank_ga_candidates(request, candidates, candidate_limit, cfg.seed)
+    solution.performance = PerformanceMetrics(
+        runtime_ms=round(timer.runtime_ms, 3),
+        stages_ms=timer.rounded_stages(),
+        counters=timer.counters,
+    )
+    return solution

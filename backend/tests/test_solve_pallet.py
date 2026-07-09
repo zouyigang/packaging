@@ -1,4 +1,5 @@
 from app.core.packer import solve
+from app.core.geometry import oriented_dims
 from app.models.schemas import Container, Item, Pallet, SolveRequest
 
 
@@ -89,3 +90,161 @@ def test_pallet_tare_weight_counts_against_container_payload():
     sol = solve(req)
     assert sol.containers == []
     assert sol.unpacked == ["a"] * 16
+
+
+def test_palletized_replay_never_shows_floating_items():
+    item = _item(32)
+    pallet = _pallet(2)
+    req = SolveRequest(
+        items=[item],
+        pallets=[pallet],
+        containers=[_big_container()],
+        objective="stability",
+    )
+
+    sol = solve(req)
+    placements = sorted(
+        [p for c in sol.containers for p in c.placements],
+        key=lambda p: p.seq,
+    )
+    seen_boxes = []
+    by_pallet = {}
+    for placement in placements:
+        if placement.pallet_id:
+            by_pallet.setdefault(placement.pallet_id, []).append(placement)
+
+    for placement in placements:
+        dx, dy, dz = oriented_dims(item.length, item.width, item.height, placement.orientation)
+        box = (placement.x, placement.y, placement.z, dx, dy, dz)
+        assert _fully_supported_in_replay(box, placement.pallet_id, by_pallet, pallet, seen_boxes)
+        seen_boxes.append(box)
+
+
+def test_default_stability_sample_replay_never_shows_floating_items():
+    items = [
+        Item(
+            id="box-A",
+            length=600,
+            width=400,
+            height=400,
+            weight=20,
+            quantity=8,
+            allowed_rotations=["LWH", "WLH"],
+            stackable=False,
+            stacking_type="not_stackable",
+            max_load_top=0,
+            customer_id="甲",
+            stop_seq=1,
+        ),
+        Item(
+            id="box-B",
+            length=400,
+            width=300,
+            height=300,
+            weight=8,
+            quantity=120,
+            allowed_rotations=["LWH", "WLH", "LHW", "HLW", "WHL", "HWL"],
+            stackable=True,
+            stacking_type="stackable",
+            max_load_top=None,
+            customer_id="甲",
+            stop_seq=1,
+        ),
+        Item(
+            id="box-C",
+            length=500,
+            width=400,
+            height=230,
+            weight=10,
+            quantity=300,
+            allowed_rotations=["LWH", "WLH", "LHW", "HLW"],
+            stackable=True,
+            stacking_type="stackable",
+            max_load_top=None,
+            customer_id="乙",
+            stop_seq=2,
+        ),
+        Item(
+            id="box-D",
+            length=300,
+            width=200,
+            height=200,
+            weight=1,
+            quantity=10,
+            allowed_rotations=["LWH", "WLH", "LHW", "HLW", "WHL", "HWL"],
+            stackable=True,
+            stacking_type="top_only",
+            max_load_top=None,
+            customer_id="乙",
+            stop_seq=2,
+        ),
+    ]
+    pallet = Pallet(
+        id="plt",
+        length=1200,
+        width=1000,
+        tare_weight=10,
+        deck_height=150,
+        max_stack_height=1500,
+        max_load=1000,
+        quantity=4,
+    )
+    req = SolveRequest(
+        items=items,
+        pallets=[pallet],
+        containers=[
+            Container(
+                id="cntr",
+                inner_length=5900,
+                inner_width=2350,
+                inner_height=2390,
+                max_payload=28000,
+                quantity=2,
+            )
+        ],
+        objective="stability",
+    )
+
+    sol = solve(req)
+    assert sum(len(container.placements) for container in sol.containers) == 438
+    _assert_replay_fully_supported(sol, {item.id: item for item in items}, {"plt": pallet})
+
+
+def _assert_replay_fully_supported(sol, item_map, pallet_map):
+    for loaded in sol.containers:
+        placements = sorted(loaded.placements, key=lambda p: p.seq)
+        by_pallet = {}
+        for placement in placements:
+            if placement.pallet_id:
+                by_pallet.setdefault(placement.pallet_id, []).append(placement)
+        seen_boxes = []
+        for placement in placements:
+            item = item_map[placement.item_id]
+            dx, dy, dz = oriented_dims(item.length, item.width, item.height, placement.orientation)
+            box = (placement.x, placement.y, placement.z, dx, dy, dz)
+            pallet = pallet_map.get(placement.pallet_id.split("#")[0]) if placement.pallet_id else None
+            assert _fully_supported_in_replay(box, placement.pallet_id, by_pallet, pallet, seen_boxes)
+            seen_boxes.append(box)
+
+
+def _fully_supported_in_replay(box, pallet_id, by_pallet, pallet, seen_boxes, eps=1e-6):
+    x, y, z, dx, dy, _dz = box
+    if z <= eps:
+        return True
+    support_area = 0.0
+    if pallet_id and pallet is not None and abs(z - pallet.deck_height) <= eps:
+        pallet_items = by_pallet[pallet_id]
+        deck_x = min(p.x for p in pallet_items)
+        deck_y = min(p.y for p in pallet_items)
+        support_area += _overlap_area(x, y, dx, dy, deck_x, deck_y, pallet.length, pallet.width)
+    for bx, by, bz, bdx, bdy, bdz in seen_boxes:
+        if abs((bz + bdz) - z) > eps:
+            continue
+        support_area += _overlap_area(x, y, dx, dy, bx, by, bdx, bdy)
+    return support_area >= dx * dy - eps
+
+
+def _overlap_area(x, y, dx, dy, bx, by, bdx, bdy):
+    ox = max(0.0, min(x + dx, bx + bdx) - max(x, bx))
+    oy = max(0.0, min(y + dy, by + bdy) - max(y, by))
+    return ox * oy

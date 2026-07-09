@@ -103,6 +103,18 @@ const ADVANCED_WEIGHT_FIELDS = [
   { key: 'loading_position', label: '装卸位置' },
 ]
 
+const GA_SPEED_OPTIONS = [
+  { value: 'fast', label: '快速' },
+  { value: 'standard', label: '标准' },
+  { value: 'fine', label: '精细' },
+]
+
+const GA_SPEED_LABELS = {
+  fast: '快速',
+  standard: '标准',
+  fine: '精细',
+}
+
 function objectiveMeta(value) {
   return FLAT_OBJECTIVES.find((item) => item.value === value) || PRODUCTION_OBJECTIVES[0]
 }
@@ -122,7 +134,10 @@ export default function EditPanel() {
   const error = useStore((s) => s.error)
   const useGa = useStore((s) => s.useGa)
   const setUseGa = useStore((s) => s.setUseGa)
+  const gaSpeed = useStore((s) => s.gaSpeed)
+  const setGaSpeed = useStore((s) => s.setGaSpeed)
   const selectedObjective = objectiveMeta(objective)
+  const solveButtonText = loading && useGa ? `GA ${GA_SPEED_LABELS[gaSpeed] || '标准'}模式求解中` : '求解装箱'
 
   return (
     <div className="edit-panel">
@@ -190,7 +205,15 @@ export default function EditPanel() {
                 <span>GA 优化</span>
               </Space>
             </Tooltip>
-            <Button type="primary" loading={loading} onClick={solve}>求解装箱</Button>
+            <Select
+              size="small"
+              value={gaSpeed}
+              onChange={setGaSpeed}
+              options={GA_SPEED_OPTIONS}
+              disabled={!useGa}
+              style={{ width: 82 }}
+            />
+            <Button type="primary" loading={loading} onClick={solve}>{solveButtonText}</Button>
           </div>
         </div>
       </div>

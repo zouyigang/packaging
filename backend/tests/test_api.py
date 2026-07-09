@@ -41,6 +41,23 @@ def test_solve_endpoint_returns_solution():
     assert len(sol.containers[0].placements) == 8
     assert sol.unpacked == []
     assert sol.alternatives == []
+    assert sol.performance is not None
+
+
+def test_solve_endpoint_logs_performance(caplog):
+    req = SolveRequest(
+        items=[Item(id="a", length=50, width=50, height=50, quantity=1)],
+        containers=[Container(
+            id="c", inner_length=100, inner_width=100, inner_height=100,
+            max_payload=10000, quantity=1,
+        )],
+    )
+
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        solve_endpoint(req)
+
+    assert "solve completed mode=heuristic" in caplog.text
+    assert "runtime_ms=" in caplog.text
 
 
 def test_openapi_schema_has_solve_contract():
@@ -56,6 +73,7 @@ def test_openapi_schema_has_solve_contract():
     assert "AdvancedWeights" in components
     assert "Evaluation" in components
     assert "ContainerEvaluation" in components
+    assert "PerformanceMetrics" in components
     assert "SolutionAlternative" in components
 
 

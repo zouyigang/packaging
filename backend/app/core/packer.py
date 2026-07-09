@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from ..models.schemas import (
@@ -17,29 +18,36 @@ from ..models.schemas import (
     Item,
     LoadedContainer,
     LoadingAccess,
+    PerformanceMetrics,
     Placement,
     Solution,
     SolveRequest,
 )
 from .constraints import (
     DEFAULT_COG_MAX_OFFSET_RATIO,
+    DEFAULT_SUPPORT_RATIO,
     EPS,
     PlacedItem,
-    check_cog_within_limits,
-    check_heavy_low,
-    check_stacking_type,
+    check_heavy_low_from_supporters,
+    check_stack_load_from_supporters,
+    check_stacking_type_from_supporters,
+    check_support_from_supporters,
     commit_stack_load,
+    supporters_from_candidates,
 )
 from .evaluator import evaluate_solution
-from .extreme_point import find_placement
-from .geometry import box_volume
+from .extreme_point import OrientedRotation, find_placement
+from .geometry import box_volume, oriented_dims
 from .objectives import Objective, ScoreContext, delivery_group_keys, get_objective
+from .performance import PerformanceTimer
 from .palletizer import (
     build_pallet_load,
     pallet_load_efficiency,
     select_pallet,
 )
 from .space import ExtremePointSet
+
+SPATIAL_BIN_SIZE = 500.0
 
 
 def _expand(items: list[Item]) -> list[Item]:
@@ -91,6 +99,8 @@ class _Placeable:
     width: float
     height: float
     allowed_rotations: list[str]
+    volume: float
+    oriented_rotations: list[OrientedRotation]
     weight: float
     customer_id: str
     order_id: str
@@ -99,11 +109,33 @@ class _Placeable:
     stacking_type: str
     max_load_top: float | None  # 顶部可承重；托盘块为 None(此处不再向上堆叠)
     contents: list | None  # list[(item_id, x, y, z, orientation)] 相对块原点；None=单件
+    content_dims: tuple[float, float, float] | None = None
 
     def item_ids(self) -> list[str]:
         if self.contents is None:
             return [self.item_id]
         return [c[0] for c in self.contents]
+
+    def emit_with_boxes(
+        self,
+        px: float,
+        py: float,
+        pz: float,
+        orientation: str,
+        start_seq: int,
+    ) -> list[tuple[Placement, tuple[float, float, float, float, float, float]]]:
+        placements = self.emit(px, py, pz, orientation, start_seq)
+        if self.contents is None:
+            dx, dy, dz = oriented_dims(self.length, self.width, self.height, orientation)
+            return [(placements[0], (px, py, pz, dx, dy, dz))]
+
+        if self.content_dims is None:
+            return [(placement, (px, py, pz, self.length, self.width, self.height)) for placement in placements]
+        out: list[tuple[Placement, tuple[float, float, float, float, float, float]]] = []
+        for placement, (_cid, ox, oy, oz, corient) in zip(placements, self.contents):
+            dx, dy, dz = oriented_dims(*self.content_dims, corient)
+            out.append((placement, (px + ox, py + oy, pz + oz, dx, dy, dz)))
+        return out
 
     def emit(self, px: float, py: float, pz: float, orientation: str, start_seq: int) -> list[Placement]:
         if self.contents is None:
@@ -151,7 +183,82 @@ def _effective_stacking_type(item: Item) -> str:
 def _can_palletize_item(item: Item) -> bool:
     return item.stackable and _effective_stacking_type(item) in {"stackable", "same_item_only"}
 
+def _placeable_volume(length: float, width: float, height: float) -> float:
+    return length * width * height
+
+
+def _oriented_rotations(
+    length: float,
+    width: float,
+    height: float,
+    allowed_rotations: list[str],
+) -> list[OrientedRotation]:
+    return [
+        (orientation, *oriented_dims(length, width, height, orientation))
+        for orientation in allowed_rotations
+    ]
+
+
+def _bounded_unique_values(values: list[float], upper: float, eps: float = 1e-6) -> list[float]:
+    if upper < -eps:
+        return []
+    bounded: list[float] = []
+    seen: set[float] = set()
+    for value in values:
+        if value < -eps or value > upper + eps:
+            continue
+        clamped = max(0.0, min(value, upper))
+        if clamped in seen:
+            continue
+        seen.add(clamped)
+        bounded.append(clamped)
+    return bounded
+
+
+def _z_key(value: float) -> float:
+    return round(value, 6)
+
+
+def _spatial_bin_range(start: float, end: float, bin_size: float = SPATIAL_BIN_SIZE) -> range:
+    first = int(max(0.0, start) // bin_size)
+    last = int(max(0.0, end - EPS) // bin_size)
+    return range(first, last + 1)
+
+
+def _add_to_spatial_grid(
+    grid: dict[tuple[int, int], list[PlacedItem]],
+    item: PlacedItem,
+    bin_size: float = SPATIAL_BIN_SIZE,
+) -> None:
+    x, y, _z, dx, dy, _dz = item.box
+    for bx in _spatial_bin_range(x, x + dx, bin_size):
+        for by in _spatial_bin_range(y, y + dy, bin_size):
+            grid.setdefault((bx, by), []).append(item)
+
+
+def _check_cog_with_context(
+    ctx: ScoreContext,
+    pl: _Placeable,
+    box: tuple[float, float, float, float, float, float],
+    weight: float,
+    inner_length: float,
+    inner_width: float,
+    max_offset_ratio: float = DEFAULT_COG_MAX_OFFSET_RATIO,
+) -> bool:
+    x, y, _z, dx, dy, _dz = box
+    mass = weight if weight > 0 else pl.volume
+    total_w = ctx.total_w + mass
+    if total_w <= EPS:
+        return True
+    gx = (ctx.sum_wx + mass * (x + dx / 2.0)) / total_w
+    gy = (ctx.sum_wy + mass * (y + dy / 2.0)) / total_w
+    norm_x = abs(gx - inner_length / 2.0) / inner_length
+    norm_y = abs(gy - inner_width / 2.0) / inner_width
+    return norm_x <= max_offset_ratio + EPS and norm_y <= max_offset_ratio + EPS
+
+
 def _single_placeable(item: Item) -> _Placeable:
+    volume = _placeable_volume(item.length, item.width, item.height)
     return _Placeable(
         item_id=item.id,
         pallet_id=None,
@@ -159,6 +266,13 @@ def _single_placeable(item: Item) -> _Placeable:
         width=item.width,
         height=item.height,
         allowed_rotations=item.allowed_rotations,
+        volume=volume,
+        oriented_rotations=_oriented_rotations(
+            item.length,
+            item.width,
+            item.height,
+            item.allowed_rotations,
+        ),
         weight=item.weight,
         customer_id=item.customer_id,
         order_id=item.order_id,
@@ -167,25 +281,36 @@ def _single_placeable(item: Item) -> _Placeable:
         stacking_type=_effective_stacking_type(item),
         max_load_top=item.max_load_top,
         contents=None,
+        content_dims=None,
     )
 
 
 def _composite_placeable(load, item: Item) -> _Placeable:
+    allowed_rotations = ["LWH"]
+    volume = _placeable_volume(load.footprint_l, load.footprint_w, load.total_height)
     return _Placeable(
         item_id=load.contents[0][0],
         pallet_id=load.pallet_id,
         length=load.footprint_l,
         width=load.footprint_w,
         height=load.total_height,
-        allowed_rotations=["LWH"],  # 托盘块 M3 固定朝向
+        allowed_rotations=allowed_rotations,  # 托盘块 M3 固定朝向
+        volume=volume,
+        oriented_rotations=_oriented_rotations(
+            load.footprint_l,
+            load.footprint_w,
+            load.total_height,
+            allowed_rotations,
+        ),
         weight=load.total_weight,
         customer_id=item.customer_id,
         order_id=item.order_id,
         destination_id=item.destination_id,
         stop_seq=item.stop_seq,
-        stacking_type="stackable",
-        max_load_top=None,
+        stacking_type="not_stackable",
+        max_load_top=0,
         contents=load.contents,
+        content_dims=(item.length, item.width, item.height),
     )
 
 
@@ -222,7 +347,10 @@ def _build_placeables(request: SolveRequest, objective: Objective) -> list[_Plac
 
 
 def _pack_placeables_into_container(
-    placeables: list[_Placeable], container: Container, objective: Objective
+    placeables: list[_Placeable],
+    container: Container,
+    objective: Objective,
+    timer: PerformanceTimer | None = None,
 ) -> tuple[LoadedContainer, list[_Placeable]]:
     loaded = LoadedContainer(id=container.id)
     ep_set = ExtremePointSet()
@@ -233,6 +361,10 @@ def _pack_placeables_into_container(
     seq = 0
     used_volume = 0.0
     used_weight = 0.0
+    top_z_levels: list[float] = [0.0]
+    top_z_seen: set[float] = {0.0}
+    support_layers: dict[float, list[PlacedItem]] = {}
+    overlap_grid_layers: dict[tuple[float, float], dict[tuple[int, int], list[PlacedItem]]] = {}
 
     # 评分上下文（含累计重心信息），供重心居中等目标使用；默认目标忽略它。
     ctx = ScoreContext(inner_length=container.inner_length, inner_width=container.inner_width, inner_height=container.inner_height)
@@ -254,7 +386,7 @@ def _pack_placeables_into_container(
         ctx.current_order_id = pl.order_id
 
         def balance_points(dx: float, dy: float, dz: float) -> list[tuple[float, float, float]]:
-            mass = pl.weight if pl.weight > 0 else dx * dy * dz
+            mass = pl.weight if pl.weight > 0 else pl.volume
             if mass <= 0:
                 return []
             total = ctx.total_w + mass
@@ -282,8 +414,9 @@ def _pack_placeables_into_container(
             ]
             xs.extend([0.0, container.inner_length - dx])
             ys.extend([0.0, container.inner_width - dy])
-            zs = [0.0]
-            zs.extend(pi.box[2] + pi.box[5] for pi in placed_items)
+            xs = _bounded_unique_values(xs, container.inner_length - dx)
+            ys = _bounded_unique_values(ys, container.inner_width - dy)
+            zs = _bounded_unique_values(top_z_levels, container.inner_height - dz)
 
             points: list[tuple[float, float, float]] = []
             seen: set[tuple[float, float, float]] = set()
@@ -295,59 +428,134 @@ def _pack_placeables_into_container(
                             continue
                         seen.add(point)
                         points.append(point)
+            if timer is not None:
+                timer.count("balance_fallback_calls")
+                timer.count("balance_fallback_points", len(points))
             return points
 
         def hard_constraints(box) -> bool:
+            if not _check_cog_with_context(
+                ctx,
+                pl,
+                box,
+                pl.weight,
+                container.inner_length,
+                container.inner_width,
+            ):
+                if timer is not None:
+                    timer.count("cog_constraint_rejections")
+                return False
+            x, y, _z, dx, dy, _dz = box
+            x2 = x + dx
+            y2 = y + dy
+            support_candidates: list[PlacedItem] = []
+            for item in support_layers.get(_z_key(box[2]), []):
+                ix, iy, _iz, idx, idy, _idz = item.box
+                if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
+                    support_candidates.append(item)
+            if timer is not None:
+                timer.count("support_candidate_items", len(support_candidates))
+            sups = supporters_from_candidates(box, support_candidates)
             return (
-                check_stacking_type(box, pl.item_id, pl.stacking_type, placed_items)
-                and check_heavy_low(box, pl.weight, placed_items)
-                and check_cog_within_limits(
-                    box,
-                    pl.weight,
-                    placed_items,
-                    container.inner_length,
-                    container.inner_width,
-                )
+                check_support_from_supporters(box, sups, DEFAULT_SUPPORT_RATIO)
+                and check_stack_load_from_supporters(pl.weight, sups)
+                and check_stacking_type_from_supporters(box, pl.item_id, pl.stacking_type, sups)
+                and check_heavy_low_from_supporters(box, pl.weight, sups)
             )
 
-        cand = find_placement(
-            pl.length,
-            pl.width,
-            pl.height,
-            pl.allowed_rotations,
-            ep_set,
-            placed_items,
-            container.inner_length,
-            container.inner_width,
-            container.inner_height,
-            score_fn=scorer,
-            weight=pl.weight,
-            extra_points_fn=balance_points,
-            hard_constraint_fn=hard_constraints,
-        )
+        def overlaps_existing(box) -> bool:
+            x, y, z, dx, dy, dz = box
+            x2 = x + dx
+            y2 = y + dy
+            z_top = z + dz
+            bx_first = int(x // SPATIAL_BIN_SIZE)
+            bx_last = int((x2 - EPS) // SPATIAL_BIN_SIZE)
+            by_first = int(y // SPATIAL_BIN_SIZE)
+            by_last = int((y2 - EPS) // SPATIAL_BIN_SIZE)
+            needs_seen = bx_first != bx_last or by_first != by_last
+            scanned = 0
+            seen: set[int] | None = set() if needs_seen else None
+            for (low, high), grid in overlap_grid_layers.items():
+                if low < z_top - EPS and high > z + EPS:
+                    for bx in range(bx_first, bx_last + 1):
+                        for by in range(by_first, by_last + 1):
+                            for item in grid.get((bx, by), []):
+                                if seen is not None:
+                                    item_key = id(item)
+                                    if item_key in seen:
+                                        continue
+                                    seen.add(item_key)
+                                scanned += 1
+                                ix, iy, _iz, idx, idy, _idz = item.box
+                                if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
+                                    if timer is not None:
+                                        timer.count("overlap_scan_items", scanned)
+                                        timer.count("overlap_candidate_items")
+                                    return True
+            if timer is not None:
+                timer.count("overlap_scan_items", scanned)
+            return False
+
+        if timer is not None:
+            timer.count("find_placement_calls")
+        with timer.stage("find_placement") if timer is not None else nullcontext():
+            cand = find_placement(
+                pl.length,
+                pl.width,
+                pl.height,
+                pl.allowed_rotations,
+                ep_set,
+                placed_items,
+                container.inner_length,
+                container.inner_width,
+                container.inner_height,
+                score_fn=scorer,
+                weight=pl.weight,
+                enforce_constraints=False,
+                extra_points_fn=balance_points,
+                hard_constraint_fn=hard_constraints,
+                overlap_check_fn=overlaps_existing,
+                oriented_rotations=pl.oriented_rotations,
+                counter_fn=timer.count if timer is not None else None,
+                max_counter_fn=timer.count_max if timer is not None else None,
+                filter_covered_points=False,
+            )
         if cand is None:
             leftover.append(pl)
             continue
         px, py, pz, *_ = cand.box
-        emitted = pl.emit(px, py, pz, cand.orientation, start_seq=seq)
+        emitted_with_boxes = pl.emit_with_boxes(px, py, pz, cand.orientation, start_seq=seq)
+        emitted = [placement for placement, _box in emitted_with_boxes]
         loaded.placements.extend(emitted)
-        placement_boxes.extend((p, cand.box) for p in emitted)
+        placement_boxes.extend(emitted_with_boxes)
         balance_boxes.append((cand.box, pl.weight))
         seq += len(emitted)
         commit_stack_load(cand.box, pl.weight, placed_items)
-        placed_items.append(PlacedItem(
+        placed_item = PlacedItem(
             box=cand.box, weight=pl.weight,
             max_load_top=pl.max_load_top, item_id=pl.item_id,
             stacking_type=pl.stacking_type,
-        ))
+        )
+        placed_items.append(placed_item)
         ep_set.remove(cand.point)
+        if timer is not None:
+            timer.count("candidate_points_pruned_covered", ep_set.prune_covered(cand.box))
+        else:
+            ep_set.prune_covered(cand.box)
         ep_set.add_from_placement(cand.box)
-        used_volume += box_volume(cand.box)
+        top_z = cand.box[2] + cand.box[5]
+        if top_z not in top_z_seen:
+            top_z_seen.add(top_z)
+            top_z_levels.append(top_z)
+        support_layers.setdefault(_z_key(top_z), []).append(placed_item)
+        overlap_key = (_z_key(cand.box[2]), _z_key(top_z))
+        _add_to_spatial_grid(overlap_grid_layers.setdefault(overlap_key, {}), placed_item)
+        used_volume += pl.volume
         used_weight += pl.weight
 
         # 更新重心累计（质量：重量优先，无重量用体积兜底；用所选 box 的中心）。
         bdx, bdy, bdz = cand.box[3], cand.box[4], cand.box[5]
-        mass = pl.weight if pl.weight > 0 else bdx * bdy * bdz
+        mass = pl.weight if pl.weight > 0 else pl.volume
         ctx.total_w += mass
         center_x = px + bdx / 2.0
         center_y = py + bdy / 2.0
@@ -538,7 +746,10 @@ def _expand_containers(request: SolveRequest, objective: Objective) -> list[Cont
 
 
 def run_container_loop(
-    placeables: list[_Placeable], containers: list[Container], objective: Objective
+    placeables: list[_Placeable],
+    containers: list[Container],
+    objective: Objective,
+    timer: PerformanceTimer | None = None,
 ) -> Solution:
     """按给定顺序把 placeables 逐只开箱装载（GA 解码器复用此函数）。
 
@@ -549,7 +760,10 @@ def run_container_loop(
     for container in containers:
         if not remaining:
             break
-        loaded, remaining = _pack_placeables_into_container(remaining, container, objective)
+        if timer is not None:
+            timer.count("containers_attempted")
+        with timer.stage("single_container_loading") if timer is not None else nullcontext():
+            loaded, remaining = _pack_placeables_into_container(remaining, container, objective, timer)
         if loaded.placements:
             solution.containers.append(loaded)
 
@@ -563,9 +777,20 @@ def run_container_loop(
 
 def solve(request: SolveRequest) -> Solution:
     """多容器求解主循环：决策码托盘 → 自动开箱直到货品装完或容器用尽。"""
-    objective = get_objective(request.objective, request.advanced_weights)
-    placeables = _build_placeables(request, objective)  # 已按大块先排序
-    containers = _expand_containers(request, objective)
-    solution = run_container_loop(placeables, containers, objective)
-    solution.evaluation = evaluate_solution(request, solution)
+    timer = PerformanceTimer()
+    with timer.stage("prepare_objective"):
+        objective = get_objective(request.objective, request.advanced_weights)
+    with timer.stage("build_placeables"):
+        placeables = _build_placeables(request, objective)  # 已按大块先排序
+    with timer.stage("expand_containers"):
+        containers = _expand_containers(request, objective)
+    with timer.stage("container_loop"):
+        solution = run_container_loop(placeables, containers, objective, timer)
+    with timer.stage("evaluator"):
+        solution.evaluation = evaluate_solution(request, solution)
+    solution.performance = PerformanceMetrics(
+        runtime_ms=round(timer.runtime_ms, 3),
+        stages_ms=timer.rounded_stages(),
+        counters=timer.counters,
+    )
     return solution

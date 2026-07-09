@@ -242,3 +242,54 @@ def test_top_load_is_zero_for_items_that_cannot_support_upper_loads():
     assert independent.max_load_top == 0
     assert top_only.max_load_top == 0
     assert support_only.max_load_top == 100
+
+
+def test_replay_sequence_is_fully_supported_for_all_core_objectives():
+    objectives = [
+        "transport_cost",
+        "max_utilization",
+        "min_containers",
+        "stability",
+        "center_of_gravity",
+        "loading_efficiency",
+        "multi_customer_delivery",
+        "balanced",
+    ]
+    items = [
+        Item(id="a", length=50, width=50, height=50, quantity=8, weight=5),
+        Item(id="b", length=100, width=50, height=50, quantity=4, weight=5, stop_seq=2),
+    ]
+    container = Container(
+        id="c",
+        inner_length=200,
+        inner_width=150,
+        inner_height=150,
+        max_payload=10000,
+        quantity=1,
+    )
+    item_map = {item.id: item for item in items}
+
+    for objective in objectives:
+        sol = solve(SolveRequest(items=items, containers=[container], objective=objective))
+        for loaded in sol.containers:
+            seen = []
+            for placement in sorted(loaded.placements, key=lambda p: p.seq):
+                item = item_map[placement.item_id]
+                dx, dy, dz = oriented_dims(item.length, item.width, item.height, placement.orientation)
+                box = (placement.x, placement.y, placement.z, dx, dy, dz)
+                assert _fully_supported_by_seen_boxes(box, seen), objective
+                seen.append(box)
+
+
+def _fully_supported_by_seen_boxes(box, seen_boxes, eps=1e-6):
+    x, y, z, dx, dy, _dz = box
+    if z <= eps:
+        return True
+    support_area = 0.0
+    for bx, by, bz, bdx, bdy, bdz in seen_boxes:
+        if abs((bz + bdz) - z) > eps:
+            continue
+        ox = max(0.0, min(x + dx, bx + bdx) - max(x, bx))
+        oy = max(0.0, min(y + dy, by + bdy) - max(y, by))
+        support_area += ox * oy
+    return support_area >= dx * dy - eps

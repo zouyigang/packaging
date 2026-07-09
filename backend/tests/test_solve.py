@@ -22,6 +22,16 @@ def test_single_container_all_packed():
     assert sol.containers[0].volume_utilization == 1.0
 
 
+def test_solve_reports_performance_metrics():
+    req = SolveRequest(items=[_box50(8)], containers=[_cube100(1)])
+    sol = solve(req)
+    assert sol.performance is not None
+    assert sol.performance.runtime_ms >= 0
+    assert "build_placeables" in sol.performance.stages_ms
+    assert "find_placement" in sol.performance.stages_ms
+    assert sol.performance.counters["find_placement_calls"] >= 1
+
+
 def test_spills_into_second_container():
     # 16 个 50³ 需要 2 只 100³ 容器
     req = SolveRequest(items=[_box50(16)], containers=[_cube100(2)])

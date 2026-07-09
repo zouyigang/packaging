@@ -22,7 +22,7 @@ const sampleItems = [
     width: 400,
     height: 400,
     weight: 20,
-    quantity: 8,
+    quantity: 40,
     allowed_rotations: defaultBaseRotations,
     stackable: false,
     stacking_type: 'not_stackable',
@@ -76,10 +76,10 @@ const sampleItems = [
     width: 200,
     height: 200,
     weight: 1,
-    quantity: 10,
+    quantity: 400,
     allowed_rotations: allRotations,
     stackable: true,
-    stacking_type: 'top_only',
+    stacking_type: 'stackable',
     max_load_top: null,
     category: '',
     customer_id: '乙',
@@ -92,7 +92,7 @@ const samplePallets = [
   { id: 'plt', name: '标准托盘', length: 1200, width: 1000, tare_weight: 10, deck_height: 150, max_stack_height: 1500, max_load: 1000, quantity: 4 },
 ]
 const sampleContainers = [
-  { id: 'cntr', name: '20GP', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 2 },
+  { id: 'cntr', name: '20GP', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 10 },
 ]
 
 export const useStore = create((set, get) => ({
@@ -102,6 +102,7 @@ export const useStore = create((set, get) => ({
   objective: 'transport_cost',
   advancedWeights: defaultAdvancedWeights,
   useGa: false,
+  gaSpeed: 'fast',
 
   solution: null,
   solutionCandidates: [],
@@ -119,6 +120,7 @@ export const useStore = create((set, get) => ({
     set((s) => ({ advancedWeights: { ...s.advancedWeights, [key]: value } })),
   resetAdvancedWeights: () => set({ advancedWeights: defaultAdvancedWeights }),
   setUseGa: (useGa) => set({ useGa }),
+  setGaSpeed: (gaSpeed) => set({ gaSpeed }),
   setActiveSolutionIndex: (index) =>
     set((s) => {
       const solution = s.solutionCandidates[index]
@@ -150,14 +152,14 @@ export const useStore = create((set, get) => ({
     set((s) => ({ [kind]: [...s[kind], row ? withRowId(kind, row) : blankRow(kind)] })),
 
   solve: async () => {
-    const { items, pallets, containers, objective, advancedWeights, useGa } = get()
+    const { items, pallets, containers, objective, advancedWeights, useGa, gaSpeed } = get()
     const payload = {
       items: normalizeItemsForSolve(items),
       pallets,
       containers,
       objective,
       use_ga: useGa,
-      ...(useGa ? { candidate_count: 3 } : {}),
+      ...(useGa ? { candidate_count: 3, ga_speed: gaSpeed } : {}),
       ...(isAdvancedObjective(objective) ? { advanced_weights: advancedWeights } : {}),
     }
     set({ loading: true, error: null })

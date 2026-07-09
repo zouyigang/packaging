@@ -132,6 +132,7 @@ export default function ResultPanel() {
         <Metric label="体积利用率" value={`${((loaded?.volume_utilization || 0) * 100).toFixed(1)}%`} />
         <Metric label="重量利用率" value={`${((loaded?.weight_utilization || 0) * 100).toFixed(1)}%`} />
         <Metric label="件数" value={total} />
+        {solution.performance && <Metric label="求解耗时" value={formatRuntime(solution.performance.runtime_ms)} />}
         <Metric label="重心偏移率" value={cog ? formatPercent(cog.offsetRate) : '-'} />
         <Metric label="重心位置" value={cog ? `${cog.x.toFixed(0)}, ${cog.y.toFixed(0)}, ${cog.z.toFixed(0)} cm` : '-'} compact />
         <div style={{ flex: 1 }} />
@@ -216,6 +217,12 @@ function Metric({ label, value, compact = false }) {
       <div className={compact ? 'metric-value metric-value-compact' : 'metric-value'}>{value}</div>
     </div>
   )
+}
+
+function formatRuntime(runtimeMs) {
+  const value = Number(runtimeMs || 0)
+  if (value >= 1000) return `${(value / 1000).toFixed(2)}s`
+  return `${value.toFixed(0)}ms`
 }
 
 function EvaluationMetricGrid({ metrics, values = {} }) {
