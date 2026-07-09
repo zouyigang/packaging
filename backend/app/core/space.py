@@ -14,6 +14,7 @@ Point = tuple[float, float, float]
 class ExtremePointSet:
     def __init__(self) -> None:
         self._points: list[Point] = [(0.0, 0.0, 0.0)]
+        self._point_keys: set[tuple[int, int, int]] = {_point_key((0.0, 0.0, 0.0))}
 
     def points(self) -> list[Point]:
         """返回按 (z, y, x) 升序排列的极点（靠底/靠里/靠左优先）。"""
@@ -22,6 +23,7 @@ class ExtremePointSet:
     def remove(self, point: Point) -> None:
         if point in self._points:
             self._points.remove(point)
+            self._point_keys.discard(_point_key(point))
 
     def add_from_placement(self, box: Box, eps: float = 1e-6) -> None:
         """根据刚放下的 box 生成新极点并并入集合（去重）。"""
@@ -34,20 +36,25 @@ class ExtremePointSet:
         for c in candidates:
             if not self._contains(c, eps):
                 self._points.append(c)
+                self._point_keys.add(_point_key(c))
 
     def prune_covered(self, box: Box, eps: float = 1e-6) -> int:
         """删除最小角已经落入 box 占用空间内的极点。"""
         before = len(self._points)
         self._points = [point for point in self._points if not _point_starts_inside_box(point, box, eps)]
+        self._point_keys = {_point_key(point) for point in self._points}
         return before - len(self._points)
 
     def _contains(self, point: Point, eps: float) -> bool:
-        return any(
-            abs(point[0] - p[0]) <= eps
-            and abs(point[1] - p[1]) <= eps
-            and abs(point[2] - p[2]) <= eps
-            for p in self._points
-        )
+        return _point_key(point, eps) in self._point_keys
+
+
+def _point_key(point: Point, eps: float = 1e-6) -> tuple[int, int, int]:
+    return (
+        round(point[0] / eps),
+        round(point[1] / eps),
+        round(point[2] / eps),
+    )
 
 
 def _point_starts_inside_box(point: Point, box: Box, eps: float = 1e-6) -> bool:

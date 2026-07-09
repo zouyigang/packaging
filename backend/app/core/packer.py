@@ -363,8 +363,12 @@ def _pack_placeables_into_container(
     used_weight = 0.0
     top_z_levels: list[float] = [0.0]
     top_z_seen: set[float] = {0.0}
-    support_layers: dict[float, list[PlacedItem]] = {}
+    support_grid_layers: dict[float, dict[tuple[int, int], list[PlacedItem]]] = {}
     overlap_grid_layers: dict[tuple[float, float], dict[tuple[int, int], list[PlacedItem]]] = {}
+    overlap_scan_items_total = 0
+    overlap_candidate_items_total = 0
+    support_scan_items_total = 0
+    support_candidate_items_total = 0
 
     # 评分上下文（含累计重心信息），供重心居中等目标使用；默认目标忽略它。
     ctx = ScoreContext(inner_length=container.inner_length, inner_width=container.inner_width, inner_height=container.inner_height)
@@ -374,6 +378,7 @@ def _pack_placeables_into_container(
         ctx.min_stop_seq = min(stops)
         ctx.max_stop_seq = max(stops)
     scorer = objective.make_scorer(ctx)
+    point_score_fn = (lambda point: (point[2], point[1], point[0])) if objective.name in {"max_utilization", "min_containers"} else None
 
     for pl in placeables:
         # 容器载重上限：累计重量不得超过 max_payload（重者放不下，留待后续容器）。
@@ -434,6 +439,7 @@ def _pack_placeables_into_container(
             return points
 
         def hard_constraints(box) -> bool:
+            nonlocal support_scan_items_total, support_candidate_items_total
             if not _check_cog_with_context(
                 ctx,
                 pl,
@@ -449,12 +455,29 @@ def _pack_placeables_into_container(
             x2 = x + dx
             y2 = y + dy
             support_candidates: list[PlacedItem] = []
-            for item in support_layers.get(_z_key(box[2]), []):
-                ix, iy, _iz, idx, idy, _idz = item.box
-                if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
-                    support_candidates.append(item)
-            if timer is not None:
-                timer.count("support_candidate_items", len(support_candidates))
+            support_scanned = 0
+            grid = support_grid_layers.get(_z_key(box[2]))
+            if grid is not None:
+                bx_first = int(x // SPATIAL_BIN_SIZE)
+                bx_last = int((x2 - EPS) // SPATIAL_BIN_SIZE)
+                by_first = int(y // SPATIAL_BIN_SIZE)
+                by_last = int((y2 - EPS) // SPATIAL_BIN_SIZE)
+                needs_seen = bx_first != bx_last or by_first != by_last
+                seen: set[int] | None = set() if needs_seen else None
+                for bx in range(bx_first, bx_last + 1):
+                    for by in range(by_first, by_last + 1):
+                        for item in grid.get((bx, by), []):
+                            if seen is not None:
+                                item_key = id(item)
+                                if item_key in seen:
+                                    continue
+                                seen.add(item_key)
+                            support_scanned += 1
+                            ix, iy, _iz, idx, idy, _idz = item.box
+                            if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
+                                support_candidates.append(item)
+            support_scan_items_total += support_scanned
+            support_candidate_items_total += len(support_candidates)
             sups = supporters_from_candidates(box, support_candidates)
             return (
                 check_support_from_supporters(box, sups, DEFAULT_SUPPORT_RATIO)
@@ -464,6 +487,7 @@ def _pack_placeables_into_container(
             )
 
         def overlaps_existing(box) -> bool:
+            nonlocal overlap_scan_items_total, overlap_candidate_items_total
             x, y, z, dx, dy, dz = box
             x2 = x + dx
             y2 = y + dy
@@ -488,12 +512,10 @@ def _pack_placeables_into_container(
                                 scanned += 1
                                 ix, iy, _iz, idx, idy, _idz = item.box
                                 if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
-                                    if timer is not None:
-                                        timer.count("overlap_scan_items", scanned)
-                                        timer.count("overlap_candidate_items")
+                                    overlap_scan_items_total += scanned
+                                    overlap_candidate_items_total += 1
                                     return True
-            if timer is not None:
-                timer.count("overlap_scan_items", scanned)
+            overlap_scan_items_total += scanned
             return False
 
         if timer is not None:
@@ -519,6 +541,7 @@ def _pack_placeables_into_container(
                 counter_fn=timer.count if timer is not None else None,
                 max_counter_fn=timer.count_max if timer is not None else None,
                 filter_covered_points=False,
+                point_score_fn=point_score_fn,
             )
         if cand is None:
             leftover.append(pl)
@@ -547,7 +570,7 @@ def _pack_placeables_into_container(
         if top_z not in top_z_seen:
             top_z_seen.add(top_z)
             top_z_levels.append(top_z)
-        support_layers.setdefault(_z_key(top_z), []).append(placed_item)
+        _add_to_spatial_grid(support_grid_layers.setdefault(_z_key(top_z), {}), placed_item)
         overlap_key = (_z_key(cand.box[2]), _z_key(top_z))
         _add_to_spatial_grid(overlap_grid_layers.setdefault(overlap_key, {}), placed_item)
         used_volume += pl.volume
@@ -575,6 +598,11 @@ def _pack_placeables_into_container(
     _resequence_inside_to_outside(
         loaded, placement_boxes, container, objective.name in {"loading_efficiency", "multi_customer_delivery"}
     )
+    if timer is not None:
+        timer.count("overlap_scan_items", overlap_scan_items_total)
+        timer.count("overlap_candidate_items", overlap_candidate_items_total)
+        timer.count("support_scan_items", support_scan_items_total)
+        timer.count("support_candidate_items", support_candidate_items_total)
     return loaded, leftover
 
 
@@ -626,32 +654,48 @@ def _resequence_inside_to_outside(
     """Assign loading seq from container inside to door while honoring support deps."""
     records = list(placement_boxes)
     deps: list[set[int]] = [set() for _ in records]
+    top_grids: dict[float, dict[tuple[int, int], list[int]]] = {}
+
+    for index, (_placement, box) in enumerate(records):
+        x, y, z, dx, dy, dz = box
+        grid = top_grids.setdefault(_z_key(z + dz), {})
+        for bx in _spatial_bin_range(x, x + dx):
+            for by in _spatial_bin_range(y, y + dy):
+                grid.setdefault((bx, by), []).append(index)
 
     for i, (_p, box) in enumerate(records):
         x, y, z, dx, dy, _dz = box
         if z <= EPS:
             continue
-        for j, (_below_p, below) in enumerate(records):
-            if i == j:
-                continue
-            bx, by, bz, bdx, bdy, bdz = below
-            if abs((bz + bdz) - z) > EPS:
-                continue
-            ox = max(0.0, min(x + dx, bx + bdx) - max(x, bx))
-            oy = max(0.0, min(y + dy, by + bdy) - max(y, by))
-            if ox * oy > EPS:
-                deps[i].add(j)
+        grid = top_grids.get(_z_key(z))
+        if grid is None:
+            continue
+        seen: set[int] = set()
+        for bx_key in _spatial_bin_range(x, x + dx):
+            for by_key in _spatial_bin_range(y, y + dy):
+                for j in grid.get((bx_key, by_key), []):
+                    if i == j or j in seen:
+                        continue
+                    seen.add(j)
+                    _below_p, below = records[j]
+                    bx, by, _bz, bdx, bdy, _bdz = below
+                    ox = max(0.0, min(x + dx, bx + bdx) - max(x, bx))
+                    oy = max(0.0, min(y + dy, by + bdy) - max(y, by))
+                    if ox * oy > EPS:
+                        deps[i].add(j)
 
     remaining = set(range(len(records)))
     emitted: list[int] = []
+    emitted_set: set[int] = set()
     while remaining:
-        ready = [i for i in remaining if deps[i].issubset(emitted)]
+        ready = [i for i in remaining if deps[i].issubset(emitted_set)]
         if not ready:
             ready = list(remaining)
         ready.sort(key=lambda i: _loading_priority(records[i], container, use_stop_priority))
         chosen = ready[0]
         remaining.remove(chosen)
         emitted.append(chosen)
+        emitted_set.add(chosen)
 
     ordered = [records[i][0] for i in emitted]
     for seq, placement in enumerate(ordered, start=1):

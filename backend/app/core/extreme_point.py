@@ -23,6 +23,7 @@ from .geometry import Box, boxes_overlap, oriented_dims
 from .space import ExtremePointSet, Point
 
 ScoreFn = Callable[[Box], tuple[float, ...]]
+PointScoreFn = Callable[[Point], tuple[float, ...]]
 PointFn = Callable[[float, float, float], list[Point]]
 HardConstraintFn = Callable[[Box], bool]
 OverlapCandidatesFn = Callable[[Box], list[PlacedItem]]
@@ -68,6 +69,7 @@ def find_placement(
     counter_fn: CounterFn | None = None,
     max_counter_fn: MaxCounterFn | None = None,
     filter_covered_points: bool = True,
+    point_score_fn: PointScoreFn | None = None,
 ) -> Candidate | None:
     """遍历极点 × 允许朝向，返回评分最优的可行放置；无解返回 None。
 
@@ -99,7 +101,6 @@ def find_placement(
         counter_fn("candidate_points_pruned", max(0, len(raw_points) - len(points)))
     if max_counter_fn is not None:
         max_counter_fn("candidate_points_ready_max", len(points))
-
     def add_attempt(
         attempts: list[Attempt],
         index: int,
@@ -148,8 +149,6 @@ def find_placement(
         nonlocal best, checked_count
         attempt_score, _index, point, orientation, box = attempt
         checked_count += 1
-        if counter_fn is not None:
-            counter_fn("candidate_boxes_checked")
         if overlap_check_fn is not None:
             if overlap_check_fn(box):
                 return False
@@ -181,7 +180,38 @@ def find_placement(
                 break
         return skipped
 
-    skipped_by_score = scan_attempts(build_attempt_heap(points))
+    def scan_point_ordered_attempts(candidate_points: list[Point]) -> int:
+        scored_count = 0
+        skipped = 0
+        ordered_points = sorted(candidate_points, key=point_score_fn) if point_score_fn is not None else candidate_points
+        for point_index, point in enumerate(ordered_points):
+            point_score = point_score_fn(point) if point_score_fn is not None else None
+            for orientation_index, (orientation, dx, dy, dz) in enumerate(orientations):
+                px, py, pz = point
+                if px + dx > inner_length + 1e-6 or py + dy > inner_width + 1e-6 or pz + dz > inner_height + 1e-6:
+                    continue
+                box: Box = (px, py, pz, dx, dy, dz)
+                scored_count += 1
+                attempt_score = point_score if point_score is not None else score(box)
+                if try_candidate((attempt_score, point_index * len(orientations) + orientation_index, point, orientation, box)):
+                    remaining_points = len(ordered_points) - point_index - 1
+                    remaining_orientations = len(orientations) - orientation_index - 1
+                    skipped += remaining_points * len(orientations) + remaining_orientations
+                    if counter_fn is not None:
+                        counter_fn("candidate_boxes_scored", scored_count)
+                    if max_counter_fn is not None:
+                        max_counter_fn("candidate_boxes_scored_max", scored_count)
+                    return skipped
+        if counter_fn is not None:
+            counter_fn("candidate_boxes_scored", scored_count)
+        if max_counter_fn is not None:
+            max_counter_fn("candidate_boxes_scored_max", scored_count)
+        return skipped
+
+    if point_score_fn is not None:
+        skipped_by_score = scan_point_ordered_attempts(points)
+    else:
+        skipped_by_score = scan_attempts(build_attempt_heap(points))
     if counter_fn is not None and skipped_by_score:
         counter_fn("candidate_boxes_skipped_by_score", skipped_by_score)
 
@@ -199,6 +229,8 @@ def find_placement(
             counter_fn("candidate_boxes_skipped_by_score", extra_skipped_by_score)
     if max_counter_fn is not None:
         max_counter_fn("candidate_boxes_checked_max", checked_count)
+    if counter_fn is not None and checked_count:
+        counter_fn("candidate_boxes_checked", checked_count)
     return best
 
 

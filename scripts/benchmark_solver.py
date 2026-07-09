@@ -109,7 +109,7 @@ def _frontend_default_request(objective: str = "center_of_gravity", use_ga: bool
                 width=300,
                 height=300,
                 weight=8,
-                quantity=120,
+                quantity=300,
                 allowed_rotations=ALL_ROTATIONS,
                 stackable=True,
                 stacking_type="stackable",
@@ -139,7 +139,7 @@ def _frontend_default_request(objective: str = "center_of_gravity", use_ga: bool
                 width=200,
                 height=200,
                 weight=1,
-                quantity=400,
+                quantity=500,
                 allowed_rotations=ALL_ROTATIONS,
                 stackable=True,
                 stacking_type="stackable",
@@ -214,6 +214,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--include-frontend", action="store_true")
+    parser.add_argument("--include-frontend-all", action="store_true")
     parser.add_argument("--include-frontend-ga", action="store_true")
     args = parser.parse_args()
 
@@ -224,6 +225,13 @@ def main() -> None:
     ]
     if args.include_frontend:
         cases.append(("frontend_default_cog", lambda: solve(_frontend_default_request("center_of_gravity"))))
+    if args.include_frontend_all:
+        cases.extend([
+            ("frontend_default_transport", lambda: solve(_frontend_default_request("transport_cost"))),
+            ("frontend_default_max_utilization", lambda: solve(_frontend_default_request("max_utilization"))),
+            ("frontend_default_stability", lambda: solve(_frontend_default_request("stability"))),
+            ("frontend_default_cog", lambda: solve(_frontend_default_request("center_of_gravity"))),
+        ])
     if args.include_frontend_ga:
         cases.append((
             "frontend_default_ga_fast",
