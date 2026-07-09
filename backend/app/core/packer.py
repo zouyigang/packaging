@@ -28,12 +28,7 @@ from .constraints import (
     DEFAULT_SUPPORT_RATIO,
     EPS,
     PlacedItem,
-    check_heavy_low_from_supporters,
-    check_stack_load_from_supporters,
-    check_stacking_type_from_supporters,
-    check_support_from_supporters,
     commit_stack_load,
-    supporters_from_candidates,
 )
 from .evaluator import evaluate_solution
 from .extreme_point import OrientedRotation, find_placement
@@ -257,6 +252,76 @@ def _check_cog_with_context(
     return norm_x <= max_offset_ratio + EPS and norm_y <= max_offset_ratio + EPS
 
 
+def _check_support_constraints_fast(
+    box: tuple[float, float, float, float, float, float],
+    pl: _Placeable,
+    sups: list[tuple[PlacedItem, float]],
+    min_support_ratio: float = DEFAULT_SUPPORT_RATIO,
+) -> bool:
+    if box[2] <= EPS:
+        return pl.stacking_type != "top_only"
+    if not sups:
+        return False
+
+    total_area = 0.0
+    for _supporter, area in sups:
+        total_area += area
+    if total_area <= EPS or total_area / (box[3] * box[4]) < min_support_ratio - EPS:
+        return False
+
+    for supporter, area in sups:
+        if pl.stacking_type == "same_item_only" and supporter.item_id != pl.item_id:
+            return False
+        supporter_type = supporter.stacking_type
+        if supporter_type == "not_stackable" or supporter_type == "top_only":
+            return False
+        if supporter_type == "same_item_only" and supporter.item_id != pl.item_id:
+            return False
+        if supporter.max_load_top is not None:
+            share = pl.weight * (area / total_area)
+            if supporter.carried + share > supporter.max_load_top + EPS:
+                return False
+        if pl.weight > supporter.weight + EPS:
+            return False
+    return True
+
+
+def _center_of_gravity_scorer(
+    ctx: ScoreContext,
+    pl: _Placeable,
+    container: Container,
+):
+    cx = container.inner_length / 2.0
+    cy = container.inner_width / 2.0
+    inv_length = 1.0 / (container.inner_length or 1.0)
+    inv_width = 1.0 / (container.inner_width or 1.0)
+    inv_height = 1.0 / (container.inner_height or 1.0)
+    unit_weight = pl.weight
+    total_w = ctx.total_w
+    sum_wx = ctx.sum_wx
+    sum_wy = ctx.sum_wy
+
+    def score(box: tuple[float, float, float, float, float, float]) -> tuple[float, ...]:
+        x, y, z, dx, dy, dz = box
+        bx = x + dx / 2.0
+        by = y + dy / 2.0
+        mass = unit_weight if unit_weight > 0 else dx * dy * dz
+        next_total = total_w + mass
+        norm_x = abs(((sum_wx + mass * bx) / next_total) - cx) * inv_length
+        norm_y = abs(((sum_wy + mass * by) / next_total) - cy) * inv_width
+        height_penalty = 0.60 * z * inv_height
+        compactness_penalty = 0.08 * ((x + dx) * inv_length + (y + dy) * inv_width)
+        return (
+            max(norm_x, norm_y) + height_penalty + compactness_penalty,
+            norm_x + norm_y + height_penalty + compactness_penalty,
+            z,
+            x,
+            y,
+        )
+
+    return score
+
+
 def _single_placeable(item: Item) -> _Placeable:
     volume = _placeable_volume(item.length, item.width, item.height)
     return _Placeable(
@@ -364,7 +429,8 @@ def _pack_placeables_into_container(
     top_z_levels: list[float] = [0.0]
     top_z_seen: set[float] = {0.0}
     support_grid_layers: dict[float, dict[tuple[int, int], list[PlacedItem]]] = {}
-    overlap_grid_layers: dict[tuple[float, float], dict[tuple[int, int], list[PlacedItem]]] = {}
+    overlap_layer_lookup: dict[tuple[float, float], dict[tuple[int, int], list[PlacedItem]]] = {}
+    overlap_grid_layers: list[tuple[float, float, dict[tuple[int, int], list[PlacedItem]]]] = []
     overlap_scan_items_total = 0
     overlap_candidate_items_total = 0
     support_scan_items_total = 0
@@ -389,6 +455,7 @@ def _pack_placeables_into_container(
         ctx.current_stop_seq = max(1, int(pl.stop_seq or 1))
         ctx.current_customer_id = pl.customer_id
         ctx.current_order_id = pl.order_id
+        placement_scorer = _center_of_gravity_scorer(ctx, pl, container) if objective.name == "center_of_gravity" else scorer
 
         def balance_points(dx: float, dy: float, dz: float) -> list[tuple[float, float, float]]:
             mass = pl.weight if pl.weight > 0 else pl.volume
@@ -454,37 +521,38 @@ def _pack_placeables_into_container(
             x, y, _z, dx, dy, _dz = box
             x2 = x + dx
             y2 = y + dy
-            support_candidates: list[PlacedItem] = []
+            if _z <= EPS:
+                return pl.stacking_type != "top_only"
+            if pl.stacking_type in {"not_stackable", "support_only"}:
+                return False
+            sups: list[tuple[PlacedItem, float]] = []
             support_scanned = 0
             grid = support_grid_layers.get(_z_key(box[2]))
-            if grid is not None:
-                bx_first = int(x // SPATIAL_BIN_SIZE)
-                bx_last = int((x2 - EPS) // SPATIAL_BIN_SIZE)
-                by_first = int(y // SPATIAL_BIN_SIZE)
-                by_last = int((y2 - EPS) // SPATIAL_BIN_SIZE)
-                needs_seen = bx_first != bx_last or by_first != by_last
-                seen: set[int] | None = set() if needs_seen else None
-                for bx in range(bx_first, bx_last + 1):
-                    for by in range(by_first, by_last + 1):
-                        for item in grid.get((bx, by), []):
-                            if seen is not None:
-                                item_key = id(item)
-                                if item_key in seen:
-                                    continue
-                                seen.add(item_key)
-                            support_scanned += 1
-                            ix, iy, _iz, idx, idy, _idz = item.box
-                            if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
-                                support_candidates.append(item)
+            if grid is None:
+                return False
+            bx_first = int(x // SPATIAL_BIN_SIZE)
+            bx_last = int((x2 - EPS) // SPATIAL_BIN_SIZE)
+            by_first = int(y // SPATIAL_BIN_SIZE)
+            by_last = int((y2 - EPS) // SPATIAL_BIN_SIZE)
+            needs_seen = bx_first != bx_last or by_first != by_last
+            seen: set[int] | None = set() if needs_seen else None
+            for bx in range(bx_first, bx_last + 1):
+                for by in range(by_first, by_last + 1):
+                    for item in grid.get((bx, by), []):
+                        if seen is not None:
+                            item_key = id(item)
+                            if item_key in seen:
+                                continue
+                            seen.add(item_key)
+                        support_scanned += 1
+                        ix, iy, _iz, idx, idy, _idz = item.box
+                        if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
+                            area = (min(x2, ix + idx) - max(x, ix)) * (min(y2, iy + idy) - max(y, iy))
+                            if area > EPS:
+                                sups.append((item, area))
             support_scan_items_total += support_scanned
-            support_candidate_items_total += len(support_candidates)
-            sups = supporters_from_candidates(box, support_candidates)
-            return (
-                check_support_from_supporters(box, sups, DEFAULT_SUPPORT_RATIO)
-                and check_stack_load_from_supporters(pl.weight, sups)
-                and check_stacking_type_from_supporters(box, pl.item_id, pl.stacking_type, sups)
-                and check_heavy_low_from_supporters(box, pl.weight, sups)
-            )
+            support_candidate_items_total += len(sups)
+            return _check_support_constraints_fast(box, pl, sups)
 
         def overlaps_existing(box) -> bool:
             nonlocal overlap_scan_items_total, overlap_candidate_items_total
@@ -499,22 +567,25 @@ def _pack_placeables_into_container(
             needs_seen = bx_first != bx_last or by_first != by_last
             scanned = 0
             seen: set[int] | None = set() if needs_seen else None
-            for (low, high), grid in overlap_grid_layers.items():
-                if low < z_top - EPS and high > z + EPS:
-                    for bx in range(bx_first, bx_last + 1):
-                        for by in range(by_first, by_last + 1):
-                            for item in grid.get((bx, by), []):
-                                if seen is not None:
-                                    item_key = id(item)
-                                    if item_key in seen:
-                                        continue
-                                    seen.add(item_key)
-                                scanned += 1
-                                ix, iy, _iz, idx, idy, _idz = item.box
-                                if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
-                                    overlap_scan_items_total += scanned
-                                    overlap_candidate_items_total += 1
-                                    return True
+            for low, high, grid in overlap_grid_layers:
+                if low >= z_top - EPS:
+                    break
+                if high <= z + EPS:
+                    continue
+                for bx in range(bx_first, bx_last + 1):
+                    for by in range(by_first, by_last + 1):
+                        for item in grid.get((bx, by), []):
+                            if seen is not None:
+                                item_key = id(item)
+                                if item_key in seen:
+                                    continue
+                                seen.add(item_key)
+                            scanned += 1
+                            ix, iy, _iz, idx, idy, _idz = item.box
+                            if x2 > ix + EPS and ix + idx > x + EPS and y2 > iy + EPS and iy + idy > y + EPS:
+                                overlap_scan_items_total += scanned
+                                overlap_candidate_items_total += 1
+                                return True
             overlap_scan_items_total += scanned
             return False
 
@@ -531,7 +602,7 @@ def _pack_placeables_into_container(
                 container.inner_length,
                 container.inner_width,
                 container.inner_height,
-                score_fn=scorer,
+                score_fn=placement_scorer,
                 weight=pl.weight,
                 enforce_constraints=False,
                 extra_points_fn=balance_points,
@@ -572,7 +643,15 @@ def _pack_placeables_into_container(
             top_z_levels.append(top_z)
         _add_to_spatial_grid(support_grid_layers.setdefault(_z_key(top_z), {}), placed_item)
         overlap_key = (_z_key(cand.box[2]), _z_key(top_z))
-        _add_to_spatial_grid(overlap_grid_layers.setdefault(overlap_key, {}), placed_item)
+        overlap_grid = overlap_layer_lookup.get(overlap_key)
+        if overlap_grid is None:
+            overlap_grid = {}
+            overlap_layer_lookup[overlap_key] = overlap_grid
+            insert_at = len(overlap_grid_layers)
+            while insert_at > 0 and overlap_grid_layers[insert_at - 1][0] > overlap_key[0]:
+                insert_at -= 1
+            overlap_grid_layers.insert(insert_at, (overlap_key[0], overlap_key[1], overlap_grid))
+        _add_to_spatial_grid(overlap_grid, placed_item)
         used_volume += pl.volume
         used_weight += pl.weight
 
