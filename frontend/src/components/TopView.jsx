@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { Empty } from 'antd'
 import { useStore } from '../store/useStore'
 import { orientedDims, colorForItem } from '../three/geometry'
@@ -16,50 +17,63 @@ export default function TopView() {
   const customerFilter = useStore((s) => s.customerFilter)
   const itemFilter = useStore((s) => s.itemFilter)
 
-  if (!solution) return <Empty style={{ marginTop: 60 }} description="先求解" />
+  const itemMap = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items])
+  const palletMap = useMemo(() => Object.fromEntries(pallets.map((p) => [p.id, p])), [pallets])
+  const loaded = solution?.containers?.[activeContainer]
+  const cdef = useMemo(
+    () => containersInput.find((c) => c.id === loaded?.id) || containersInput[0],
+    [containersInput, loaded?.id],
+  )
+  const sequenceVisible = useMemo(
+    () => (loaded?.placements || []).filter((p) => p.seq <= seqCursor),
+    [loaded?.placements, seqCursor],
+  )
+  const filteredPlacements = useMemo(
+    () => filterPlacements(sequenceVisible, itemMap, customerFilter, itemFilter),
+    [sequenceVisible, itemMap, customerFilter, itemFilter],
+  )
 
-  const itemMap = Object.fromEntries(items.map((i) => [i.id, i]))
-  const palletMap = Object.fromEntries(pallets.map((p) => [p.id, p]))
-  const loaded = solution.containers[activeContainer]
-  const cdef = containersInput.find((c) => c.id === loaded?.id) || containersInput[0]
+  const boxes = useMemo(
+    () => filteredPlacements
+      .map((p) => {
+        const it = itemMap[p.item_id]
+        const [dx, dy, dz] = it ? orientedDims(it.length, it.width, it.height, p.orientation) : [0, 0, 0]
+        return { p, dx, dy, ztop: p.z + dz, it }
+      })
+      .sort((a, b) => a.p.z - b.p.z),
+    [filteredPlacements, itemMap],
+  )
+
+  const maxZ = Math.max(1, ...boxes.map((b) => b.ztop))
+  const cog = useMemo(() => calculateCenterOfGravity(filteredPlacements, itemMap, cdef), [filteredPlacements, itemMap, cdef])
+
+  // 从可见的托盘货品反推各托盘底板（俯视下的 footprint），画在货品下层。
+  const decks = useMemo(() => {
+    const deckGroups = {}
+    for (const b of boxes) {
+      if (!b.p.pallet_id) continue
+      ;(deckGroups[b.p.pallet_id] ||= []).push(b)
+    }
+    return Object.entries(deckGroups)
+      .map(([pid, bs]) => {
+        const pdef = palletMap[pid.split('#')[0]]
+        if (!pdef) return null
+        return {
+          x: Math.min(...bs.map((b) => b.p.x)),
+          y: Math.min(...bs.map((b) => b.p.y)),
+          L: pdef.length,
+          W: pdef.width,
+        }
+      })
+      .filter(Boolean)
+  }, [boxes, palletMap])
+
+  if (!solution) return <Empty style={{ marginTop: 60 }} description="先求解" />
   if (!loaded || !cdef) return <Empty style={{ marginTop: 60 }} description="无数据" />
 
   const L = cdef.inner_length
   const W = cdef.inner_width
   const PAD = L * 0.04
-
-  const sequenceVisible = loaded.placements.filter((p) => p.seq <= seqCursor)
-  const filteredPlacements = filterPlacements(sequenceVisible, itemMap, customerFilter, itemFilter)
-
-  const boxes = filteredPlacements
-    .map((p) => {
-      const it = itemMap[p.item_id]
-      const [dx, dy, dz] = it ? orientedDims(it.length, it.width, it.height, p.orientation) : [0, 0, 0]
-      return { p, dx, dy, ztop: p.z + dz, it }
-    })
-    .sort((a, b) => a.p.z - b.p.z) // 低层先画
-
-  const maxZ = Math.max(1, ...boxes.map((b) => b.ztop))
-  const cog = calculateCenterOfGravity(filteredPlacements, itemMap, cdef)
-
-  // 从可见的托盘货品反推各托盘底板（俯视下的 footprint），画在货品下层。
-  const deckGroups = {}
-  for (const b of boxes) {
-    if (!b.p.pallet_id) continue
-    ;(deckGroups[b.p.pallet_id] ||= []).push(b)
-  }
-  const decks = Object.entries(deckGroups)
-    .map(([pid, bs]) => {
-      const pdef = palletMap[pid.split('#')[0]]
-      if (!pdef) return null
-      return {
-        x: Math.min(...bs.map((b) => b.p.x)),
-        y: Math.min(...bs.map((b) => b.p.y)),
-        L: pdef.length,
-        W: pdef.width,
-      }
-    })
-    .filter(Boolean)
 
   return (
     <div style={{ height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 16 }}>

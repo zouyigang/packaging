@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Slider, Button, Segmented, Tag, Empty } from 'antd'
 import { CaretRightOutlined, PauseOutlined, StepBackwardOutlined } from '@ant-design/icons'
 import { useStore } from '../store/useStore'
@@ -37,6 +37,33 @@ const CONTAINER_EVALUATION_METRICS = [
   { key: 'pallet_score', label: '托盘化' },
 ]
 
+const PERFORMANCE_STAGE_LABELS = {
+  build_placeables: '构造货品',
+  pack_containers: '容器装载',
+  pack_single_container: '单箱装载',
+  find_placement: '寻找位置',
+  evaluator: '方案评分',
+  ga_initial_population: 'GA 初始种群',
+  ga_generation: 'GA 迭代',
+  ga_decode: 'GA 解码',
+}
+
+const PERFORMANCE_COUNTER_LABELS = {
+  find_placement_calls: '位置搜索次数',
+  candidate_points_ready: '候选点数',
+  candidate_boxes_scored: '候选评分',
+  candidate_boxes_checked: '硬约束检查',
+  candidate_boxes_skipped_by_bound: '下界跳过',
+  overlap_scan_items: '碰撞扫描',
+  overlap_candidate_items: '碰撞候选',
+  support_scan_items: '支撑扫描',
+  support_candidate_items: '支撑候选',
+  fallback_balance_calls: '重心 fallback',
+  ga_generations_completed: 'GA 完成代数',
+  ga_decode_cache_hits: 'GA 缓存命中',
+  ga_decode_cache_misses: 'GA 缓存未命中',
+}
+
 export default function ResultPanel() {
   const solution = useStore((s) => s.solution)
   const solutionCandidates = useStore((s) => s.solutionCandidates)
@@ -53,12 +80,16 @@ export default function ResultPanel() {
 
   const loaded = solution?.containers?.[activeContainer]
   const total = loaded?.placements.length || 0
-  const itemMap = Object.fromEntries(items.map((item) => [item.id, item]))
+  const itemMap = useMemo(() => Object.fromEntries(items.map((item) => [item.id, item])), [items])
   const cdef = containersInput.find((container) => container.id === loaded?.id) || containersInput[0]
-  const visible = (loaded?.placements || []).filter((placement) => placement.seq <= seqCursor)
-  const cog = calculateCenterOfGravity(visible, itemMap, cdef)
+  const visible = useMemo(
+    () => (loaded?.placements || []).filter((placement) => placement.seq <= seqCursor),
+    [loaded?.placements, seqCursor],
+  )
+  const cog = useMemo(() => calculateCenterOfGravity(visible, itemMap, cdef), [visible, itemMap, cdef])
   const evaluation = solution?.evaluation
   const activeEvaluation = evaluation?.containers?.[activeContainer]
+  const slowHint = getSlowSolveHint(solution?.performance)
 
   useEffect(() => {
     if (!playing) return
@@ -136,6 +167,7 @@ export default function ResultPanel() {
         <Metric label="重心偏移率" value={cog ? formatPercent(cog.offsetRate) : '-'} />
         <Metric label="重心位置" value={cog ? `${cog.x.toFixed(0)}, ${cog.y.toFixed(0)}, ${cog.z.toFixed(0)} cm` : '-'} compact />
         <div style={{ flex: 1 }} />
+        {slowHint && <Tag color="warning">{slowHint}</Tag>}
         {solution.unpacked.length > 0 && <Tag color="warning">余货 {solution.unpacked.length} 件</Tag>}
       </div>
 
@@ -185,6 +217,8 @@ export default function ResultPanel() {
         </div>
       )}
 
+      {solution.performance && <PerformancePanel performance={solution.performance} />}
+
       <div className="playback-row">
         <Button icon={<StepBackwardOutlined />} onClick={() => { setSeqCursor(0); setPlaying(false) }} />
         <Button
@@ -210,6 +244,78 @@ export default function ResultPanel() {
   )
 }
 
+function PerformancePanel({ performance }) {
+  const stages = Object.entries(performance?.stages_ms || {})
+    .filter(([, value]) => Number(value) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, 6)
+  const counters = Object.entries(PERFORMANCE_COUNTER_LABELS)
+    .map(([key, label]) => ({ key, label, value: performance?.counters?.[key] }))
+    .filter((item) => item.value !== undefined && Number(item.value) !== 0)
+    .slice(0, 8)
+  const runtimeMs = Number(performance?.runtime_ms || 0)
+  const slowHint = getSlowSolveHint(performance)
+
+  if (stages.length === 0 && counters.length === 0) return null
+
+  return (
+    <details className="performance-panel">
+      <summary className="performance-head">
+        <div>
+          <strong>性能诊断</strong>
+          <span>本次求解耗时拆分</span>
+        </div>
+        {slowHint && <Tag color="warning">{slowHint}</Tag>}
+      </summary>
+      <div className="performance-content">
+        {stages.length > 0 && (
+          <div className="performance-block">
+            <div className="performance-block-title">阶段耗时</div>
+            <div className="performance-stage-list">
+              {stages.map(([key, value]) => (
+                <PerformanceStage
+                  key={key}
+                  label={PERFORMANCE_STAGE_LABELS[key] || key}
+                  value={Number(value)}
+                  total={runtimeMs}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        {counters.length > 0 && (
+          <div className="performance-block">
+            <div className="performance-block-title">关键计数</div>
+            <div className="performance-counter-grid">
+              {counters.map((counter) => (
+                <div className="performance-counter" key={counter.key}>
+                  <span>{counter.label}</span>
+                  <strong>{formatCount(counter.value)}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function PerformanceStage({ label, value, total }) {
+  const percent = total > 0 ? Math.max(2, Math.min(100, (value / total) * 100)) : 0
+  return (
+    <div className="performance-stage">
+      <div className="performance-stage-head">
+        <span>{label}</span>
+        <strong>{formatRuntime(value)}</strong>
+      </div>
+      <div className="performance-bar">
+        <div style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function Metric({ label, value, compact = false }) {
   return (
     <div className="metric-card">
@@ -223,6 +329,19 @@ function formatRuntime(runtimeMs) {
   const value = Number(runtimeMs || 0)
   if (value >= 1000) return `${(value / 1000).toFixed(2)}s`
   return `${value.toFixed(0)}ms`
+}
+
+function formatCount(value) {
+  const number = Number(value || 0)
+  return new Intl.NumberFormat('zh-CN').format(number)
+}
+
+function getSlowSolveHint(performance) {
+  const runtimeMs = Number(performance?.runtime_ms || 0)
+  if (runtimeMs < 8000) return ''
+  const counters = performance?.counters || {}
+  const isGa = Number(counters.ga_generations_completed || 0) > 0
+  return isGa ? '耗时偏高，可切换快速档或降低 GA 精度' : '耗时偏高，可先用非 GA 快速试算'
 }
 
 function EvaluationMetricGrid({ metrics, values = {} }) {

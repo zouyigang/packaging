@@ -232,6 +232,7 @@ function buildSolutionCandidates(solution) {
       containers: alternative.containers || [],
       unpacked: alternative.unpacked || [],
       evaluation: alternative.evaluation || null,
+      performance: solution.performance || null,
       candidate_rank: alternative.rank,
       candidate_seed: alternative.seed,
       alternatives: [],

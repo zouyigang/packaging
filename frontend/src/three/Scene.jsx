@@ -1,9 +1,10 @@
+import { useMemo } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Edges } from '@react-three/drei'
 import { useStore } from '../store/useStore'
 import { orientedDims, colorForItem } from './geometry'
 import { calculateCenterOfGravity } from '../utils/cog'
-import { filterPlacements } from '../utils/customerFilter'
+import { ALL_CUSTOMERS, ALL_ITEMS, customerKey } from '../utils/customerFilter'
 
 const SCALE = 0.01 // mm → 场景单位（1000mm = 10）
 
@@ -12,21 +13,11 @@ function toScene(x, y, z) {
   return [x * SCALE, z * SCALE, y * SCALE]
 }
 
-function Box({ placement, item }) {
-  if (!item) return null
-  const [dx, dy, dz] = orientedDims(item.length, item.width, item.height, placement.orientation)
-  // box 中心（后端坐标）
-  const cx = placement.x + dx / 2
-  const cy = placement.y + dy / 2
-  const cz = placement.z + dz / 2
-  const pos = toScene(cx, cy, cz)
-  const size = [dx * SCALE, dz * SCALE, dy * SCALE] // 注意 y/z 互换
-  // 始终按类别上色；是否在托盘上由下方的托盘台面体现，不再用颜色区分。
-  const color = colorForItem(item)
+function Box({ box }) {
   return (
-    <mesh position={pos}>
-      <boxGeometry args={size} />
-      <meshStandardMaterial color={color} />
+    <mesh position={box.position}>
+      <boxGeometry args={box.size} />
+      <meshStandardMaterial color={box.color} />
       <Edges color="#333" />
     </mesh>
   )
@@ -46,9 +37,10 @@ function PalletDeck({ deck }) {
 }
 
 // 从可见的托盘货品反推各托盘台面：按 pallet_id 分组，取最小角与托盘尺寸。
-function deriveDecks(visible, palletMap) {
+function deriveDecks(visibleBoxes, palletMap) {
   const groups = {}
-  for (const p of visible) {
+  for (const box of visibleBoxes) {
+    const p = box.placement
     if (!p.pallet_id) continue
     ;(groups[p.pallet_id] ||= []).push(p)
   }
@@ -113,21 +105,34 @@ export default function Scene() {
   const customerFilter = useStore((s) => s.customerFilter)
   const itemFilter = useStore((s) => s.itemFilter)
 
-  const itemMap = Object.fromEntries(items.map((i) => [i.id, i]))
-  const palletMap = Object.fromEntries(pallets.map((p) => [p.id, p]))
+  const itemMap = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items])
+  const palletMap = useMemo(() => Object.fromEntries(pallets.map((p) => [p.id, p])), [pallets])
   const loaded = solution?.containers?.[activeContainer]
   // 用输入容器尺寸画外框（按装载容器 id 匹配，回退第一个）
-  const cdef =
-    containersInput.find((c) => c.id === loaded?.id) || containersInput[0]
+  const cdef = useMemo(
+    () => containersInput.find((c) => c.id === loaded?.id) || containersInput[0],
+    [containersInput, loaded?.id],
+  )
 
-  const sequenceVisible = (loaded?.placements || []).filter((p) => p.seq <= seqCursor)
-  const visible = filterPlacements(sequenceVisible, itemMap, customerFilter, itemFilter)
-  const decks = deriveDecks(visible, palletMap)
-  const cog = calculateCenterOfGravity(visible, itemMap, cdef)
+  const renderBoxes = useMemo(
+    () => (loaded?.placements || []).map((placement, index) => buildRenderBox(placement, itemMap, index)).filter(Boolean),
+    [loaded?.placements, itemMap],
+  )
+  const visibleBoxes = useMemo(
+    () => renderBoxes.filter((box) => box.seq <= seqCursor && matchesFilters(box, customerFilter, itemFilter)),
+    [renderBoxes, seqCursor, customerFilter, itemFilter],
+  )
+  const visiblePlacements = useMemo(() => visibleBoxes.map((box) => box.placement), [visibleBoxes])
+  const decks = useMemo(() => deriveDecks(visibleBoxes, palletMap), [visibleBoxes, palletMap])
+  const cog = useMemo(() => calculateCenterOfGravity(visiblePlacements, itemMap, cdef), [visiblePlacements, itemMap, cdef])
 
   // 让相机大致对准容器中心
   const cx = (cdef?.inner_length || 5900) * SCALE
-  const camPos = [cx * 1.2, cx * 1.0, cx * 1.4]
+  const camPos = useMemo(() => [cx * 1.2, cx * 1.0, cx * 1.4], [cx])
+  const controlTarget = useMemo(
+    () => (cdef ? [cx / 2, 0, (cdef.inner_width * SCALE) / 2] : [0, 0, 0]),
+    [cdef, cx],
+  )
 
   return (
     <Canvas frameloop="demand" camera={{ position: camPos, fov: 50, far: 5000 }}>
@@ -138,12 +143,37 @@ export default function Scene() {
       {decks.map((d, i) => (
         <PalletDeck key={`deck-${i}`} deck={d} />
       ))}
-      {visible.map((p, i) => (
-        <Box key={`${p.item_id}-${p.seq}-${i}`} placement={p} item={itemMap[p.item_id]} />
+      {visibleBoxes.map((box) => (
+        <Box key={box.key} box={box} />
       ))}
       <CogMarker cog={cog} />
       <gridHelper args={[200, 40, '#ccc', '#eee']} />
-      <OrbitControls makeDefault target={cdef ? [cx / 2, 0, (cdef.inner_width * SCALE) / 2] : [0, 0, 0]} />
+      <OrbitControls makeDefault target={controlTarget} />
     </Canvas>
   )
+}
+
+function buildRenderBox(placement, itemMap, index) {
+  const item = itemMap[placement.item_id]
+  if (!item) return null
+  const [dx, dy, dz] = orientedDims(item.length, item.width, item.height, placement.orientation)
+  const cx = placement.x + dx / 2
+  const cy = placement.y + dy / 2
+  const cz = placement.z + dz / 2
+  return {
+    key: `${placement.item_id}-${placement.seq}-${index}`,
+    seq: placement.seq,
+    itemId: placement.item_id,
+    customer: customerKey(placement.customer_id ?? item.customer_id),
+    placement,
+    position: toScene(cx, cy, cz),
+    size: [dx * SCALE, dz * SCALE, dy * SCALE],
+    color: colorForItem(item),
+  }
+}
+
+function matchesFilters(box, customerFilter, itemFilter) {
+  if (customerFilter && customerFilter !== ALL_CUSTOMERS && box.customer !== customerFilter) return false
+  if (itemFilter && itemFilter !== ALL_ITEMS && box.itemId !== itemFilter) return false
+  return true
 }

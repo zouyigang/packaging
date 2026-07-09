@@ -137,7 +137,9 @@ export default function EditPanel() {
   const gaSpeed = useStore((s) => s.gaSpeed)
   const setGaSpeed = useStore((s) => s.setGaSpeed)
   const selectedObjective = objectiveMeta(objective)
-  const solveButtonText = loading && useGa ? `GA ${GA_SPEED_LABELS[gaSpeed] || '标准'}模式求解中` : '求解装箱'
+  const solveButtonText = loading
+    ? (useGa ? `GA ${GA_SPEED_LABELS[gaSpeed] || '标准'}模式求解中` : `${selectedObjective.label}求解中`)
+    : '求解装箱'
 
   return (
     <div className="edit-panel">
