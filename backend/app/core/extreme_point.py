@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import heapq
 from dataclasses import dataclass
 from typing import Callable
 
@@ -116,27 +115,27 @@ def find_placement(
         box: Box = (px, py, pz, dx, dy, dz)
         attempts.append((score(box), index, point, orientation, box))
 
-    def build_attempt_heap(candidate_points: list[Point]) -> list[Attempt]:
+    def build_attempts(candidate_points: list[Point]) -> list[Attempt]:
         attempts: list[Attempt] = []
         index = 0
         for point in candidate_points:
             for orientation, dx, dy, dz in orientations:
                 add_attempt(attempts, index, point, orientation, dx, dy, dz)
                 index += 1
-        heapq.heapify(attempts)
+        attempts.sort()
         if counter_fn is not None:
             counter_fn("candidate_boxes_scored", len(attempts))
         if max_counter_fn is not None:
             max_counter_fn("candidate_boxes_scored_max", len(attempts))
         return attempts
 
-    def build_extra_attempt_heap(
+    def build_extra_attempts(
         candidate_entries: list[tuple[Point, str, float, float, float]]
     ) -> list[Attempt]:
         attempts: list[Attempt] = []
         for index, (point, orientation, dx, dy, dz) in enumerate(candidate_entries):
             add_attempt(attempts, index, point, orientation, dx, dy, dz)
-        heapq.heapify(attempts)
+        attempts.sort()
         if counter_fn is not None:
             counter_fn("candidate_boxes_scored", len(attempts))
         if max_counter_fn is not None:
@@ -170,13 +169,12 @@ def find_placement(
 
     def scan_attempts(attempts: list[Attempt]) -> int:
         skipped = 0
-        while attempts:
-            attempt = heapq.heappop(attempts)
+        for index, attempt in enumerate(attempts):
             if best is not None and attempt[0] >= best.score:
-                skipped += len(attempts) + 1
+                skipped += len(attempts) - index
                 break
             if try_candidate(attempt):
-                skipped += len(attempts)
+                skipped += len(attempts) - index - 1
                 break
         return skipped
 
@@ -211,7 +209,7 @@ def find_placement(
     if point_score_fn is not None:
         skipped_by_score = scan_point_ordered_attempts(points)
     else:
-        skipped_by_score = scan_attempts(build_attempt_heap(points))
+        skipped_by_score = scan_attempts(build_attempts(points))
     if counter_fn is not None and skipped_by_score:
         counter_fn("candidate_boxes_skipped_by_score", skipped_by_score)
 
@@ -224,7 +222,7 @@ def find_placement(
                     continue
                 seen.add(point)
                 extra_entries.append((point, orientation, dx, dy, dz))
-        extra_skipped_by_score = scan_attempts(build_extra_attempt_heap(extra_entries))
+        extra_skipped_by_score = scan_attempts(build_extra_attempts(extra_entries))
         if counter_fn is not None and extra_skipped_by_score:
             counter_fn("candidate_boxes_skipped_by_score", extra_skipped_by_score)
     if max_counter_fn is not None:
