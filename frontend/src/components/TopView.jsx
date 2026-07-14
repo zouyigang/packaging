@@ -63,6 +63,7 @@ export default function TopView() {
   return (
     <div style={{ height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 16 }}>
       <svg
+        data-testid="topview"
         viewBox={`${-PAD} ${-PAD} ${L + 2 * PAD} ${W + 2 * PAD}`}
         style={{ width: '100%', height: '100%', maxWidth: '100%', maxHeight: '100%' }}
         preserveAspectRatio="xMidYMid meet"
@@ -86,7 +87,7 @@ export default function TopView() {
           const fill = colorForItem(b.it)
           const depth = 0.25 + 0.55 * (b.ztop / maxZ) // 越高越不透明
           return (
-            <g key={`${b.p.seq}-${i}`}>
+            <g key={`${b.p.seq}-${i}`} data-testid="topview-box">
               <rect
                 x={b.p.x} y={b.p.y} width={b.dx} height={b.dy}
                 fill={fill} fillOpacity={depth}

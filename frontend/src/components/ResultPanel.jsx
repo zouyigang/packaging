@@ -410,6 +410,9 @@ function violationLocation(violation) {
   if (violation.container_index !== null && violation.container_index !== undefined) {
     // 多只容器共用同一个类型 id，只有实例下标能定位到具体是哪一只。
     parts.push(`容器 #${violation.container_index + 1}${violation.container_id ? ` ${violation.container_id}` : ''}`)
+  } else if (violation.container_id) {
+    // 求解前的配置类告警还没开箱，只有设备类型，没有实例——按类型定位。
+    parts.push(`设备 ${violation.container_id}`)
   }
   if (violation.item_id) parts.push(`货品 ${violation.item_id}`)
   if (violation.stop_seq) parts.push(`站点 ${violation.stop_seq}`)

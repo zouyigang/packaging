@@ -178,7 +178,7 @@ frontend/
 | 第 5 步 策略对比门禁 | ✅ 完成：9 个基准用例各自钉上关键指标基线与允许退化幅度（容器数 0 容差、成本 +2%、体积利用 −2%、固定力 +10% 等），越界即失败并指名越界项；已用两次真实历史回归验证 |
 | 第 6 步 评估与界面 | ✅ 完成：`error/warning/info` 三层语义与 `feasible/partial/infeasible` 对应；新增 `Solution.diagnostics` 与告警的容器实例下标（顺带修掉同名告警被去重吞掉的缺陷）；前端分层展示 + `destroyOnHidden` 迁移 |
 
-**阶段四已收尾（第 0~6 步全部完成）**。后续候选方向（尚未排定优先级，需先确认业务价值）：① GA 与工业约束的联合优化——目前 GA 只搜「放置顺序 + 朝向」，工业硬约束仍靠解码器逐候选拒绝，把工业指标并入 fitness 有望在同样容器数下拿到更低固定力；② 前端 3D/2D 的浏览器回归验证（当前只有构建验证，无端到端点击回归）；③ 多容器类型混装的成本最优（现有多容器循环按目标排定开箱顺序，未做类型组合搜索）。
+**阶段四已收尾（第 0~6 步全部完成）**。后续候选方向（尚未排定优先级，需先确认业务价值）：① GA 与工业约束的联合优化——目前 GA 只搜「放置顺序 + 朝向」，工业硬约束仍靠解码器逐候选拒绝，把工业指标并入 fitness 有望在同样容器数下拿到更低固定力；② 多容器类型混装的成本最优（现有多容器循环按目标排定开箱顺序，未做类型组合搜索）。
 
 ---
 
@@ -201,11 +201,13 @@ python -m pytest                  # 跑全部单元测试（pytest.ini 已配置
 
 ### 当前进度
 
-整体进度见第 9 节路线图（四阶段，当前在第四阶段）。后端引擎 185 个单元测试全绿；前端 React 可视化端到端联调通过。修改求解目标、GA fitness、托盘化、硬约束或评估公式时，必须同步更新 `docs/evaluation.md` 与 `docs/industrial-strategies.md`。
+整体进度见第 9 节路线图（四阶段，当前在第四阶段）。后端引擎 203 个单元测试全绿；前端 6 个 Playwright 端到端用例全绿（真实浏览器 + 真实后端）。修改求解目标、GA fitness、托盘化、硬约束或评估公式时，必须同步更新 `docs/evaluation.md` 与 `docs/industrial-strategies.md`。
 
 > 后端测试：`conda run -n packaging python -m pytest backend -q`
 > 启动 API：在 `backend/` 下 `conda run -n packaging uvicorn app.main:app --port 8000`，文档见 `/docs`。
 > 启动前端：在 `frontend/` 下 `npm install` 后 `npm run dev`（http://localhost:5173，已配 `/api`→8000 代理）。
+> 前端端到端回归：在 `frontend/` 下 `npm run e2e`（Playwright + 真实 Chromium + 真实 uvicorn 后端，自动拉起两个服务；首次需 `npx playwright install chromium` 下载浏览器）。覆盖 3D 渲染、2D 俯视、顺序回放、货品筛选、CSV 导出、诊断分层。`npm run e2e:ui` 开可视化调试。
+> 后端解释器不在 PATH 时用 `PACKAGING_PYTHON=<python 路径> npm run e2e`。
 
 M1（核心引擎最小闭环）：
 - `app/models/schemas.py` — Item/Pallet/Container/Placement/LoadedContainer/Solution/SolveRequest（Pydantic v2），含 6 种轴对齐朝向定义。

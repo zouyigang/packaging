@@ -36,3 +36,7 @@ Thumbs.db
 
 # ---- Claude Code 本机配置（个人本地设置，不入库） ----
 .claude/
+
+# ---- Playwright 端到端测试产物 ----
+frontend/test-results/
+frontend/playwright-report/
