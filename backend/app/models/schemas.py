@@ -292,4 +292,7 @@ class SolveRequest(BaseModel):
     candidate_count: int = Field(ge=1, le=8, default=3)
     validation_mode: ValidationMode = "standard"
     pallet_policy: PalletPolicy = "auto"
+    # 安全优先：只影响 safe_loading。开启后允许它为降低堆垛风险多开容器——扁平件先落位、
+    # 少码细高柱，代价是容器数可能上升。默认关闭（容器优先），与其他策略口径一致。
+    safety_priority: bool = False
     cost_currency: str = Field(default="CNY", min_length=1, max_length=8)

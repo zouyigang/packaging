@@ -416,36 +416,41 @@ def _run_strategy_case(strategy: str, iterations: int, warmups: int) -> dict:
     }
 
 
-def _run_large_strategy_case(strategy: str, iterations: int, warmups: int) -> dict:
+def _run_large_strategy_case(
+    strategy: str, iterations: int, warmups: int, safety_priority: bool = False
+) -> dict:
     request = _frontend_industrial_request(strategy)
+    request.safety_priority = safety_priority
+    label = f"{strategy}_safety_first" if safety_priority else strategy
     for _ in range(warmups):
         solve(request)
     solutions = [solve(request) for _ in range(iterations)]
     signatures = {_solution_signature(solution) for solution in solutions}
     if len(signatures) != 1:
-        raise RuntimeError(f"industrial_large_{strategy} produced non-deterministic layouts: {sorted(signatures)}")
+        raise RuntimeError(f"industrial_large_{label} produced non-deterministic layouts: {sorted(signatures)}")
     performance = [solution.performance.model_dump() for solution in solutions if solution.performance]
     if len(performance) != len(solutions):
-        raise RuntimeError(f"industrial_large_{strategy} did not return performance metrics")
+        raise RuntimeError(f"industrial_large_{label} did not return performance metrics")
     quality = _quality_summary(request, solutions[-1])
     if quality["status"] != "feasible" or quality["loaded_count"] != quality["requested_count"]:
         raise RuntimeError(
-            f"industrial_large_{strategy} failed completion gate: "
+            f"industrial_large_{label} failed completion gate: "
             f"status={quality['status']} loaded={quality['loaded_count']}/{quality['requested_count']}"
         )
     if quality["error_codes"]:
-        raise RuntimeError(f"industrial_large_{strategy} returned industrial errors: {quality['error_codes']}")
+        raise RuntimeError(f"industrial_large_{label} returned industrial errors: {quality['error_codes']}")
     if quality["pallet_overhang_count"]:
         raise RuntimeError(
-            f"industrial_large_{strategy} returned {quality['pallet_overhang_count']} pallet overhangs"
+            f"industrial_large_{label} returned {quality['pallet_overhang_count']} pallet overhangs"
         )
     if quality["container_count"] > 3:
         raise RuntimeError(
-            f"industrial_large_{strategy} exceeded container gate: {quality['container_count']} > 3"
+            f"industrial_large_{label} exceeded container gate: {quality['container_count']} > 3"
         )
     return {
-        "case": f"industrial_large_{strategy}",
+        "case": f"industrial_large_{label}",
         "strategy": strategy,
+        "safety_priority": safety_priority,
         "scale": "frontend_1140_items",
         "deterministic": len(solutions) > 1,
         **quality,
@@ -508,6 +513,13 @@ def main() -> None:
         results.extend(
             _run_large_strategy_case(strategy, max(1, args.iterations), max(0, args.warmups))
             for strategy in INDUSTRIAL_STRATEGIES
+        )
+        # 安全优先是 safe_loading 的第二条路径（用容器换低固定力），一并纳入门禁。
+        results.append(
+            _run_large_strategy_case(
+                "safe_loading", max(1, args.iterations), max(0, args.warmups),
+                safety_priority=True,
+            )
         )
     print(json.dumps(results, ensure_ascii=False, indent=2))
 

@@ -409,7 +409,9 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     request, initial_violations = prepare_request(request)
     cfg = config or GAConfig()
     with timer.stage("prepare_objective"):
-        objective = get_objective(request.objective, request.advanced_weights)
+        objective = get_objective(
+            request.objective, request.advanced_weights, request.safety_priority
+        )
     with timer.stage("build_placeables"):
         placeables: list[_Placeable] = _build_placeables(request, objective)
     with timer.stage("expand_containers"):

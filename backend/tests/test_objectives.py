@@ -124,3 +124,33 @@ def test_loading_efficiency_prefers_inside_before_width():
     inside = obj.placement_score((0, 100, 0, 10, 10, 10))
     outside = obj.placement_score((100, 0, 0, 10, 10, 10))
     assert inside < outside
+
+
+def test_safety_priority_orders_flat_placeables_first():
+    from app.core.objectives import SafeLoading
+
+    class _P:
+        def __init__(self, pid, length, width, height):
+            self.id = pid
+            self.length, self.width, self.height = length, width, height
+            self.must_load = False
+            self.priority = 0
+
+    # 体积上 tall 更大、扁平度上 flat 更扁，两个排序键给出相反的顺序。
+    tall = _P("tall", 300, 300, 1200)    # 体积 108e6；扁平度 300/√360000 = 0.50
+    flat = _P("flat", 800, 600, 100)     # 体积 48e6； 扁平度 100/√480000 ≈ 0.14
+    placeables = [tall, flat]
+
+    assert [p.id for p in SafeLoading().order_placeables(placeables)] == ["tall", "flat"]
+    ordered = SafeLoading(safety_priority=True).order_placeables(placeables)
+    assert [p.id for p in ordered] == ["flat", "tall"]
+
+
+def test_safety_priority_only_rebuilds_safe_loading():
+    from app.core.objectives import SafeLoading
+
+    safe = get_objective("safe_loading", safety_priority=True)
+    assert isinstance(safe, SafeLoading) and safe.safety_priority is True
+    # 默认与其他策略不受影响，仍复用注册表单例。
+    assert get_objective("safe_loading").safety_priority is False
+    assert get_objective("cost_efficiency", safety_priority=True) is get_objective("cost_efficiency")

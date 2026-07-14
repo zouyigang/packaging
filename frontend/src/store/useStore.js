@@ -108,6 +108,7 @@ export const useStore = create((set, get) => ({
   advancedWeights: defaultAdvancedWeights,
   validationMode: 'standard',
   palletPolicy: 'auto',
+  safetyPriority: false,
   costCurrency: 'CNY',
   useGa: false,
   gaSpeed: 'fast',
@@ -126,6 +127,7 @@ export const useStore = create((set, get) => ({
   setObjective: (objective) => set({ objective }),
   setValidationMode: (validationMode) => set({ validationMode }),
   setPalletPolicy: (palletPolicy) => set({ palletPolicy }),
+  setSafetyPriority: (safetyPriority) => set({ safetyPriority }),
   setCostCurrency: (costCurrency) => set({ costCurrency }),
   setAdvancedWeight: (key, value) =>
     set((s) => ({ advancedWeights: { ...s.advancedWeights, [key]: value } })),
@@ -163,7 +165,7 @@ export const useStore = create((set, get) => ({
     set((s) => ({ [kind]: [...s[kind], row ? withRowId(kind, row) : blankRow(kind)] })),
 
   solve: async () => {
-    const { items, pallets, containers, objective, advancedWeights, validationMode, palletPolicy, costCurrency, useGa, gaSpeed } = get()
+    const { items, pallets, containers, objective, advancedWeights, validationMode, palletPolicy, safetyPriority, costCurrency, useGa, gaSpeed } = get()
     set({ loading: true, error: null })
     try {
       const payload = {
@@ -173,6 +175,7 @@ export const useStore = create((set, get) => ({
         objective,
         validation_mode: validationMode,
         pallet_policy: palletPolicy,
+        safety_priority: safetyPriority,
         cost_currency: costCurrency,
         use_ga: useGa,
         ...(useGa ? { candidate_count: 3, ga_speed: gaSpeed } : {}),

@@ -202,10 +202,38 @@ class SafeLoading(Stability):
 
     name = "safe_loading"
 
+    def __init__(self, safety_priority: bool = False):
+        self.safety_priority = safety_priority
+
     def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
         # Keep the local search stable and compact; whole-load balance is
         # corrected by the safe-loading centering pass after construction.
         return self.placement_score
+
+    def order_placeables(self, placeables: list[Any]) -> list[Any]:
+        if not self.safety_priority:
+            return super().order_placeables(placeables)
+        # 安全优先：扁平件先落位。堆垛簇的倾覆裕量与所需固定力由「重心高 / 底面半宽」
+        # 决定，先把矮胖件铺开、把细高件留到最后，能显著压低细长比与固定力需求。
+        # 这会改变装填顺序、从而降低密度——容器数可能上升，是用户明确选择的交换。
+        return sorted(
+            placeables,
+            key=lambda p: (
+                -int(bool(getattr(p, "must_load", False))),
+                -int(getattr(p, "priority", 0) or 0),
+                _flatness(p),
+                -(p.length * p.width * p.height),
+            ),
+        )
+
+
+def _flatness(placeable: Any) -> float:
+    """最小边 / √(底面积)：越小越扁平，堆起来重心越低、底面相对越宽。"""
+    short, mid, long_ = sorted((placeable.length, placeable.width, placeable.height))
+    base_area = mid * long_
+    if base_area <= 0:
+        return 0.0
+    return short / base_area ** 0.5
 
 
 class Balanced(Objective):
@@ -626,13 +654,21 @@ def resolve_objective(name: str) -> tuple[str, str]:
     except KeyError as exc:
         raise ValueError(f"未知优化目标: {name!r}，可选: {sorted(_REGISTRY)}") from exc
 
-def get_objective(name: str, advanced_weights: Any | None = None) -> Objective:
+def get_objective(
+    name: str,
+    advanced_weights: Any | None = None,
+    safety_priority: bool = False,
+) -> Objective:
     if name in {"advanced_score", "balanced", "custom"} and advanced_weights is not None:
         return Custom(_coerce_advanced_weights(advanced_weights)) if name == "custom" else Balanced(_coerce_advanced_weights(advanced_weights))
     try:
-        return _REGISTRY[name]
+        objective = _REGISTRY[name]
     except KeyError as exc:
         raise ValueError(f"未知优化目标: {name!r}，可选: {sorted(_REGISTRY)}") from exc
+    # 注册表存的是单例；安全优先要换一套放置顺序，故另建实例，不污染共享单例。
+    if safety_priority and isinstance(objective, SafeLoading):
+        return SafeLoading(safety_priority=True)
+    return objective
 
 
 def _coerce_advanced_weights(value: Any) -> AdvancedScoreWeights:

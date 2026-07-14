@@ -1807,7 +1807,9 @@ def solve(request: SolveRequest) -> Solution:
     timer = PerformanceTimer()
     request, initial_violations = prepare_request(request)
     with timer.stage("prepare_objective"):
-        objective = get_objective(request.objective, request.advanced_weights)
+        objective = get_objective(
+            request.objective, request.advanced_weights, request.safety_priority
+        )
     with timer.stage("build_placeables"):
         placeables = _build_placeables(request, objective)  # 已按大块先排序
     with timer.stage("expand_containers"):

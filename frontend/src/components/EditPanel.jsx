@@ -172,6 +172,8 @@ export default function EditPanel() {
   const setValidationMode = useStore((s) => s.setValidationMode)
   const palletPolicy = useStore((s) => s.palletPolicy)
   const setPalletPolicy = useStore((s) => s.setPalletPolicy)
+  const safetyPriority = useStore((s) => s.safetyPriority)
+  const setSafetyPriority = useStore((s) => s.setSafetyPriority)
   const costCurrency = useStore((s) => s.costCurrency)
   const setCostCurrency = useStore((s) => s.setCostCurrency)
   const selectedObjective = objectiveMeta(objective)
@@ -265,6 +267,14 @@ export default function EditPanel() {
               options={['CNY', 'USD', 'EUR'].map((value) => ({ value, label: value }))}
               style={{ width: 72 }}
             />
+            {objective === 'safe_loading' && (
+              <Tooltip title="扁平件先落位、少码细高柱，显著降低堆垛所需固定力；代价是密度下降、可能多开容器">
+                <Space size={6}>
+                  <Switch size="small" checked={safetyPriority} onChange={setSafetyPriority} />
+                  <span>安全优先</span>
+                </Space>
+              </Tooltip>
+            )}
             <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
               <Space size={6}>
                 <Switch size="small" checked={useGa} onChange={setUseGa} />
