@@ -4,7 +4,9 @@ import { defineConfig, devices } from '@playwright/test'
 // 后端只有单元测试和基准兜底，前端此前只有「构建通过」——3D 渲染、顺序回放、2D 俯视、
 // CSV 导出、诊断分层都没有任何自动化验证。这套用例补的就是这个缺口。
 //
-// 后端解释器可用 PACKAGING_PYTHON 覆盖（如 conda 环境的 python.exe）。
+// 后端解释器：必须和跑单元测试的那个环境一致，否则 e2e 会在一个没人维护的环境上跑。
+// PATH 上的 `python` 未必就是项目环境（本机 PATH 上是独立的 D:\Python313，而项目用的是
+// conda 的 packaging 环境），所以用 PACKAGING_PYTHON 显式指定。见 CLAUDE.md 的运行命令。
 const PYTHON = process.env.PACKAGING_PYTHON || 'python'
 
 export default defineConfig({

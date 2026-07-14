@@ -205,11 +205,21 @@ python -m pytest                  # 跑全部单元测试（pytest.ini 已配置
 
 整体进度见第 9 节路线图（四阶段，当前在第四阶段）。后端引擎 203 个单元测试全绿；前端 6 个 Playwright 端到端用例全绿（真实浏览器 + 真实后端）。修改求解目标、GA fitness、托盘化、硬约束或评估公式时，必须同步更新 `docs/evaluation.md` 与 `docs/industrial-strategies.md`。
 
-> 后端测试：`conda run -n packaging python -m pytest backend -q`
-> 启动 API：在 `backend/` 下 `conda run -n packaging uvicorn app.main:app --port 8000`，文档见 `/docs`。
+**解释器（重要）**：项目用 conda 的 `packaging` 环境（本机在 `D:\miniconda3\envs\packaging\python.exe`）。
+PATH 上的 `python` **不是**它（本机 PATH 上是另一个独立的 `D:\Python313`），所以任何后端命令都要显式指定解释器，别依赖 PATH。
+`conda run -n packaging` 在本机输出中文时会 GBK 编码崩溃，故直接调环境里的 `python.exe` 并带上 `PYTHONIOENCODING=utf-8`：
+
+```bash
+PYTHONIOENCODING=utf-8 D:/miniconda3/envs/packaging/python.exe -m pytest backend -q          # 后端测试
+PYTHONIOENCODING=utf-8 D:/miniconda3/envs/packaging/python.exe scripts/benchmark_solver.py \
+    --iterations 2 --warmups 0 --industrial-strategies --industrial-large                     # 基准 + 质量门禁
+```
+
+> 启动 API：在 `backend/` 下 `D:/miniconda3/envs/packaging/python.exe -m uvicorn app.main:app --port 8000`，文档见 `/docs`。
 > 启动前端：在 `frontend/` 下 `npm install` 后 `npm run dev`（http://localhost:5173，已配 `/api`→8000 代理）。
-> 前端端到端回归：在 `frontend/` 下 `npm run e2e`（Playwright + 真实 Chromium + 真实 uvicorn 后端，自动拉起两个服务；首次需 `npx playwright install chromium` 下载浏览器）。覆盖 3D 渲染、2D 俯视、顺序回放、货品筛选、CSV 导出、诊断分层。`npm run e2e:ui` 开可视化调试。
-> 后端解释器不在 PATH 时用 `PACKAGING_PYTHON=<python 路径> npm run e2e`。
+> 前端端到端回归：在 `frontend/` 下 `PACKAGING_PYTHON=D:/miniconda3/envs/packaging/python.exe npm run e2e`。
+> **必须带 `PACKAGING_PYTHON`**，否则 Playwright 会用 PATH 上的 `python` 起后端——那是另一个环境，只是碰巧也装了 fastapi，依赖一旦漂移 e2e 就在测一个没人维护的环境。
+> （Playwright + 真实 Chromium + 真实 uvicorn，自动拉起两个服务；首次需 `npx playwright install chromium`。覆盖 3D 渲染、2D 俯视、顺序回放、货品筛选、CSV 导出、诊断分层。`npm run e2e:ui` 开可视化调试。）
 
 M1（核心引擎最小闭环）：
 - `app/models/schemas.py` — Item/Pallet/Container/Placement/LoadedContainer/Solution/SolveRequest（Pydantic v2），含 6 种轴对齐朝向定义。
