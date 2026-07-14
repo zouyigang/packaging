@@ -1,5 +1,9 @@
 # 策略评估算法
 
+> 新生产策略、工业模式和兼容映射见 [industrial-strategies.md](industrial-strategies.md)。
+> 当前生产策略为 `cost_efficiency`、`space_utilization`、`safe_loading`、
+> `delivery_sequence` 和 `custom`；下文旧名称权重仅用于兼容请求。
+
 本文档记录装箱方案评估算法。以后修改求解目标、GA fitness、托盘化逻辑、硬约束或评估公式时，必须同步更新本文档。
 
 ## 基本原则

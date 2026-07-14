@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .geometry import Box
@@ -31,7 +31,9 @@ class PlacedItem:
     max_load_top: Optional[float]  # None=无限制, 0=易碎
     item_id: str
     stacking_type: str = "stackable"
+    stop_seq: int = 1
     carried: float = 0.0  # 已压在其顶部的累计重量
+    supported_by: list[tuple["PlacedItem", float]] = field(default_factory=list)
 
 
 def _base_area(box: Box) -> float:
@@ -95,10 +97,8 @@ def check_stack_load_from_supporters(weight: float, sups: list[tuple[PlacedItem,
     if total_area <= EPS:
         return True  # 地面承重，无上限
     for pi, area in sups:
-        if pi.max_load_top is None:
-            continue  # 无限制
         share = weight * (area / total_area)
-        if pi.carried + share > pi.max_load_top + EPS:
+        if not can_accept_stack_load(pi, share):
             return False
     return True
 
@@ -201,4 +201,24 @@ def commit_stack_load(box: Box, weight: float, placed: list[PlacedItem]) -> None
     if total_area <= EPS:
         return
     for pi, area in sups:
-        pi.carried += weight * (area / total_area)
+        _propagate_stack_load(pi, weight * (area / total_area))
+
+
+def can_accept_stack_load(item: PlacedItem, added_load: float) -> bool:
+    if item.max_load_top is not None and item.carried + added_load > item.max_load_top + EPS:
+        return False
+    return all(can_accept_stack_load(supporter, added_load * fraction) for supporter, fraction in item.supported_by)
+
+
+def _propagate_stack_load(item: PlacedItem, added_load: float) -> None:
+    item.carried += added_load
+    for supporter, fraction in item.supported_by:
+        _propagate_stack_load(supporter, added_load * fraction)
+
+
+def support_links(box: Box, placed: list[PlacedItem]) -> list[tuple[PlacedItem, float]]:
+    sups = supporters(box, placed)
+    total_area = sum(area for _item, area in sups)
+    if total_area <= EPS:
+        return []
+    return [(item, area / total_area) for item, area in sups]

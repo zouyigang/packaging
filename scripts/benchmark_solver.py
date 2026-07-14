@@ -6,6 +6,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -17,12 +18,28 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from app.core.ga import GAConfig, solve_ga  # noqa: E402
+from app.core.geometry import oriented_dims  # noqa: E402
 from app.core.packer import solve  # noqa: E402
-from app.models.schemas import Container, Item, LoadingAccess, Pallet, SolveRequest  # noqa: E402
+from app.models.schemas import (  # noqa: E402
+    AccelerationProfile,
+    CogLimits,
+    Container,
+    Item,
+    LoadDistributionPoint,
+    LoadingAccess,
+    Pallet,
+    SolveRequest,
+)
 
 ALL_ROTATIONS = ["LWH", "WLH", "LHW", "HLW", "WHL", "HWL"]
 DEFAULT_BASE_ROTATIONS = ["LWH", "WLH"]
 TWO_BASE_ROTATIONS = ["LWH", "WLH", "LHW", "HLW"]
+INDUSTRIAL_STRATEGIES = (
+    "cost_efficiency",
+    "space_utilization",
+    "safe_loading",
+    "delivery_sequence",
+)
 
 
 def _default_request() -> SolveRequest:
@@ -178,6 +195,107 @@ def _frontend_default_request(objective: str = "center_of_gravity", use_ga: bool
     )
 
 
+def _industrial_strategy_request(objective: str) -> SolveRequest:
+    """Small production-like case shared by all canonical strategy benchmarks."""
+    return SolveRequest(
+        items=[
+            Item(
+                id="early-heavy",
+                length=600,
+                width=400,
+                height=300,
+                weight=120,
+                quantity=12,
+                must_load=True,
+                priority=100,
+                customer_id="A",
+                stop_seq=1,
+            ),
+            Item(
+                id="late-medium",
+                length=500,
+                width=400,
+                height=250,
+                weight=90,
+                quantity=16,
+                customer_id="B",
+                stop_seq=2,
+            ),
+            Item(
+                id="late-small",
+                length=300,
+                width=250,
+                height=200,
+                weight=35,
+                quantity=20,
+                customer_id="B",
+                stop_seq=2,
+            ),
+        ],
+        containers=[
+            Container(
+                id="vehicle",
+                inner_length=3000,
+                inner_width=1600,
+                inner_height=1600,
+                max_payload=5000,
+                quantity=2,
+                use_cost=750,
+                equipment_profile="generic",
+                cog_limits={
+                    "x_min_ratio": 0.20,
+                    "x_max_ratio": 0.80,
+                    "y_min_ratio": 0.20,
+                    "y_max_ratio": 0.80,
+                    "z_max_ratio": 0.70,
+                },
+                max_floor_load_kg_m2=5000,
+                acceleration_profile={
+                    "longitudinal_g": 0.8,
+                    "transverse_g": 0.5,
+                    "vertical_g": 0.2,
+                },
+                default_friction_coefficient=0.4,
+                loading_accesses=[LoadingAccess(side="x_max")],
+            )
+        ],
+        objective=objective,
+        validation_mode="industrial",
+        pallet_policy="avoid",
+    )
+
+
+def _frontend_industrial_request(objective: str) -> SolveRequest:
+    """Production-scale industrial case using the 1,140-item frontend sample."""
+    request = _frontend_default_request(objective)
+    request.validation_mode = "industrial"
+    request.pallet_policy = "auto"
+    for pallet in request.pallets:
+        pallet.handling_cost = 20
+    for container in request.containers:
+        container.use_cost = 2000
+        container.equipment_profile = "road_vehicle"
+        container.cog_limits = CogLimits(
+            x_min_ratio=0.15,
+            x_max_ratio=0.85,
+            y_min_ratio=0.15,
+            y_max_ratio=0.85,
+            z_max_ratio=0.75,
+        )
+        container.load_distribution_curve = [
+            LoadDistributionPoint(x_ratio=0.0, max_payload=container.max_payload),
+            LoadDistributionPoint(x_ratio=1.0, max_payload=container.max_payload),
+        ]
+        container.max_floor_load_kg_m2 = 10000
+        container.acceleration_profile = AccelerationProfile(
+            longitudinal_g=0.8,
+            transverse_g=0.5,
+            vertical_g=0.2,
+        )
+        container.default_friction_coefficient = 0.4
+    return request
+
+
 def _summarize(samples: list[dict]) -> dict:
     runtimes = [sample["runtime_ms"] for sample in samples]
     stage_keys = sorted({key for sample in samples for key in sample["stages_ms"]})
@@ -209,6 +327,132 @@ def _run_case(name: str, solver: Callable[[], object], iterations: int, warmups:
     return {"case": name, **_summarize(samples)}
 
 
+def _solution_signature(solution) -> str:
+    layout = [
+        {
+            "container": loaded.id,
+            "placements": [
+                [
+                    placement.item_id,
+                    placement.x,
+                    placement.y,
+                    placement.z,
+                    placement.orientation,
+                    placement.stop_seq,
+                ]
+                for placement in loaded.placements
+            ],
+        }
+        for loaded in solution.containers
+    ]
+    payload = json.dumps(layout, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _quality_summary(request: SolveRequest, solution) -> dict:
+    evaluation_metrics = solution.evaluation.metrics if solution.evaluation else {}
+    loaded_count = sum(len(loaded.placements) for loaded in solution.containers)
+    industrial = [loaded.industrial_metrics for loaded in solution.containers]
+    error_codes = sorted({v.code for v in solution.violations if v.severity == "error"})
+    item_map = {item.id: item for item in request.items}
+    pallet_overhang_count = 0
+    for loaded in solution.containers:
+        pallet_instances = {pallet.id: pallet for pallet in loaded.pallet_instances}
+        for placement in loaded.placements:
+            pallet = pallet_instances.get(placement.pallet_id)
+            item = item_map.get(placement.item_id)
+            if pallet is None or item is None:
+                continue
+            dx, dy, _dz = oriented_dims(item.length, item.width, item.height, placement.orientation)
+            if (
+                placement.x < pallet.x - 1e-6
+                or placement.y < pallet.y - 1e-6
+                or placement.x + dx > pallet.x + pallet.length + 1e-6
+                or placement.y + dy > pallet.y + pallet.width + 1e-6
+            ):
+                pallet_overhang_count += 1
+    return {
+        "status": solution.status,
+        "loaded_count": loaded_count,
+        "requested_count": sum(item.quantity for item in request.items),
+        "unpacked_count": len(solution.unpacked),
+        "container_count": len(solution.containers),
+        "total_cost": solution.cost_summary.total_cost if solution.cost_summary else 0.0,
+        "volume_utilization": evaluation_metrics.get("used_volume_utilization", 0.0),
+        "stability_score": evaluation_metrics.get("stability_score", 0.0),
+        "balance_score": evaluation_metrics.get("balance_score", 0.0),
+        "loading_score": evaluation_metrics.get("loading_score", 0.0),
+        "max_floor_load_kg_m2": max((m.get("max_floor_load_kg_m2", 0.0) for m in industrial), default=0.0),
+        "min_tip_stability_margin": min((m.get("tip_stability_margin", 1.0) for m in industrial), default=1.0),
+        "required_securement_kn": max((m.get("required_securement_kn", 0.0) for m in industrial), default=0.0),
+        "stack_cluster_tip_margin": evaluation_metrics.get("stack_cluster_tip_margin", 1.0),
+        "risky_stack_cluster_count": int(evaluation_metrics.get("risky_stack_cluster_count", 0)),
+        "max_stack_cluster_slenderness": evaluation_metrics.get("max_stack_cluster_slenderness", 0.0),
+        "required_stack_longitudinal_restraint_kn": evaluation_metrics.get("required_stack_longitudinal_restraint_kn", 0.0),
+        "required_stack_transverse_restraint_kn": evaluation_metrics.get("required_stack_transverse_restraint_kn", 0.0),
+        "pallet_overhang_count": pallet_overhang_count,
+        "error_codes": error_codes,
+        "layout_signature": _solution_signature(solution),
+    }
+
+
+def _run_strategy_case(strategy: str, iterations: int, warmups: int) -> dict:
+    request = _industrial_strategy_request(strategy)
+    for _ in range(warmups):
+        solve(request)
+    solutions = [solve(request) for _ in range(iterations)]
+    signatures = {_solution_signature(solution) for solution in solutions}
+    if len(signatures) != 1:
+        raise RuntimeError(f"industrial_{strategy} produced non-deterministic layouts: {sorted(signatures)}")
+    performance = [solution.performance.model_dump() for solution in solutions if solution.performance]
+    if len(performance) != len(solutions):
+        raise RuntimeError(f"industrial_{strategy} did not return performance metrics")
+    return {
+        "case": f"industrial_{strategy}",
+        "strategy": strategy,
+        "deterministic": len(solutions) > 1,
+        **_quality_summary(request, solutions[-1]),
+        **_summarize(performance),
+    }
+
+
+def _run_large_strategy_case(strategy: str, iterations: int, warmups: int) -> dict:
+    request = _frontend_industrial_request(strategy)
+    for _ in range(warmups):
+        solve(request)
+    solutions = [solve(request) for _ in range(iterations)]
+    signatures = {_solution_signature(solution) for solution in solutions}
+    if len(signatures) != 1:
+        raise RuntimeError(f"industrial_large_{strategy} produced non-deterministic layouts: {sorted(signatures)}")
+    performance = [solution.performance.model_dump() for solution in solutions if solution.performance]
+    if len(performance) != len(solutions):
+        raise RuntimeError(f"industrial_large_{strategy} did not return performance metrics")
+    quality = _quality_summary(request, solutions[-1])
+    if quality["status"] != "feasible" or quality["loaded_count"] != quality["requested_count"]:
+        raise RuntimeError(
+            f"industrial_large_{strategy} failed completion gate: "
+            f"status={quality['status']} loaded={quality['loaded_count']}/{quality['requested_count']}"
+        )
+    if quality["error_codes"]:
+        raise RuntimeError(f"industrial_large_{strategy} returned industrial errors: {quality['error_codes']}")
+    if quality["pallet_overhang_count"]:
+        raise RuntimeError(
+            f"industrial_large_{strategy} returned {quality['pallet_overhang_count']} pallet overhangs"
+        )
+    if quality["container_count"] > 3:
+        raise RuntimeError(
+            f"industrial_large_{strategy} exceeded container gate: {quality['container_count']} > 3"
+        )
+    return {
+        "case": f"industrial_large_{strategy}",
+        "strategy": strategy,
+        "scale": "frontend_1140_items",
+        "deterministic": len(solutions) > 1,
+        **quality,
+        **_summarize(performance),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=3)
@@ -216,6 +460,16 @@ def main() -> None:
     parser.add_argument("--include-frontend", action="store_true")
     parser.add_argument("--include-frontend-all", action="store_true")
     parser.add_argument("--include-frontend-ga", action="store_true")
+    parser.add_argument(
+        "--industrial-strategies",
+        action="store_true",
+        help="compare the four canonical production strategies on one industrial case",
+    )
+    parser.add_argument(
+        "--industrial-large",
+        action="store_true",
+        help="compare the four production strategies on the 1,140-item frontend-scale industrial case",
+    )
     args = parser.parse_args()
 
     cases = [
@@ -227,10 +481,11 @@ def main() -> None:
         cases.append(("frontend_default_cog", lambda: solve(_frontend_default_request("center_of_gravity"))))
     if args.include_frontend_all:
         cases.extend([
-            ("frontend_default_transport", lambda: solve(_frontend_default_request("transport_cost"))),
-            ("frontend_default_max_utilization", lambda: solve(_frontend_default_request("max_utilization"))),
-            ("frontend_default_stability", lambda: solve(_frontend_default_request("stability"))),
-            ("frontend_default_cog", lambda: solve(_frontend_default_request("center_of_gravity"))),
+            ("frontend_default_cost", lambda: solve(_frontend_default_request("cost_efficiency"))),
+            ("frontend_default_space", lambda: solve(_frontend_default_request("space_utilization"))),
+            ("frontend_default_safe", lambda: solve(_frontend_default_request("safe_loading"))),
+            ("frontend_default_delivery", lambda: solve(_frontend_default_request("delivery_sequence"))),
+            ("frontend_default_custom", lambda: solve(_frontend_default_request("custom"))),
         ])
     if args.include_frontend_ga:
         cases.append((
@@ -244,6 +499,16 @@ def main() -> None:
         _run_case(name, solver, max(1, args.iterations), max(0, args.warmups))
         for name, solver in cases
     ]
+    if args.industrial_strategies:
+        results.extend(
+            _run_strategy_case(strategy, max(1, args.iterations), max(0, args.warmups))
+            for strategy in INDUSTRIAL_STRATEGIES
+        )
+    if args.industrial_large:
+        results.extend(
+            _run_large_strategy_case(strategy, max(1, args.iterations), max(0, args.warmups))
+            for strategy in INDUSTRIAL_STRATEGIES
+        )
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 

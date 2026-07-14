@@ -5,6 +5,7 @@ import { useStore } from '../store/useStore'
 import { orientedDims, colorForItem } from './geometry'
 import { calculateCenterOfGravity } from '../utils/cog'
 import { ALL_CUSTOMERS, ALL_ITEMS, customerKey } from '../utils/customerFilter'
+import { deriveVisiblePalletDecks } from '../utils/palletDecks'
 
 const SCALE = 0.01 // mm → 场景单位（1000mm = 10）
 
@@ -34,26 +35,6 @@ function PalletDeck({ deck }) {
       <Edges color="#5c3d1e" />
     </mesh>
   )
-}
-
-// 从可见的托盘货品反推各托盘台面：按 pallet_id 分组，取最小角与托盘尺寸。
-function deriveDecks(visibleBoxes, palletMap) {
-  const groups = {}
-  for (const box of visibleBoxes) {
-    const p = box.placement
-    if (!p.pallet_id) continue
-    ;(groups[p.pallet_id] ||= []).push(p)
-  }
-  const decks = []
-  for (const [pid, ps] of Object.entries(groups)) {
-    const pdef = palletMap[pid.split('#')[0]]
-    if (!pdef) continue
-    const x = Math.min(...ps.map((p) => p.x))
-    const y = Math.min(...ps.map((p) => p.y))
-    const minItemZ = Math.min(...ps.map((p) => p.z)) // 货品底 = 台面顶
-    decks.push({ x, y, z: minItemZ - pdef.deck_height, L: pdef.length, W: pdef.width, H: pdef.deck_height })
-  }
-  return decks
 }
 
 function ContainerBox({ container }) {
@@ -123,7 +104,10 @@ export default function Scene() {
     [renderBoxes, seqCursor, customerFilter, itemFilter],
   )
   const visiblePlacements = useMemo(() => visibleBoxes.map((box) => box.placement), [visibleBoxes])
-  const decks = useMemo(() => deriveDecks(visibleBoxes, palletMap), [visibleBoxes, palletMap])
+  const decks = useMemo(
+    () => deriveVisiblePalletDecks(visiblePlacements, loaded?.pallet_instances, palletMap),
+    [visiblePlacements, loaded?.pallet_instances, palletMap],
+  )
   const cog = useMemo(() => calculateCenterOfGravity(visiblePlacements, itemMap, cdef), [visiblePlacements, itemMap, cdef])
 
   // 让相机大致对准容器中心
@@ -140,8 +124,8 @@ export default function Scene() {
       <directionalLight position={[50, 80, 40]} intensity={0.8} />
       <directionalLight position={[-40, 30, -40]} intensity={0.3} />
       {cdef && <ContainerBox container={cdef} />}
-      {decks.map((d, i) => (
-        <PalletDeck key={`deck-${i}`} deck={d} />
+      {decks.map((d) => (
+        <PalletDeck key={`deck-${d.id}`} deck={d} />
       ))}
       {visibleBoxes.map((box) => (
         <Box key={box.key} box={box} />

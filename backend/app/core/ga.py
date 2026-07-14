@@ -6,15 +6,17 @@ responsible for decoding each ordered individual into a concrete solution.
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from os import cpu_count
 
 import numpy as np
 
 from ..models.schemas import Container, Item, PerformanceMetrics, Solution, SolutionAlternative, SolveRequest
 from .evaluator import evaluate_solution
+from .industrial import finalize_solution, prepare_request
 from .geometry import oriented_dims
-from .objectives import AdvancedScoreWeights, get_objective
+from .objectives import AdvancedScoreWeights, get_objective, resolve_objective
 from .packer import (
     _Placeable,
     _build_placeables,
@@ -26,6 +28,7 @@ from .performance import PerformanceTimer
 _GA_WORKER_PLACEABLES: list[_Placeable] | None = None
 _GA_WORKER_CONTAINERS: list[Container] | None = None
 _GA_WORKER_OBJECTIVE: object | None = None
+_GA_WORKER_OBSERVE_INDUSTRIAL = False
 
 
 @dataclass
@@ -77,22 +80,57 @@ def _init_ga_decode_worker(
     placeables: list[_Placeable],
     containers: list[Container],
     objective: object,
+    observe_industrial: bool,
 ) -> None:
-    global _GA_WORKER_PLACEABLES, _GA_WORKER_CONTAINERS, _GA_WORKER_OBJECTIVE
+    global _GA_WORKER_PLACEABLES, _GA_WORKER_CONTAINERS, _GA_WORKER_OBJECTIVE, _GA_WORKER_OBSERVE_INDUSTRIAL
     _GA_WORKER_PLACEABLES = placeables
     _GA_WORKER_CONTAINERS = containers
     _GA_WORKER_OBJECTIVE = objective
+    _GA_WORKER_OBSERVE_INDUSTRIAL = observe_industrial
 
 
 def _decode_ga_order_worker(
-    order: tuple[int, ...],
+    signature: tuple[int, ...],
 ) -> tuple[tuple[int, ...], Solution, dict[str, float], dict[str, int]]:
     if _GA_WORKER_PLACEABLES is None or _GA_WORKER_CONTAINERS is None or _GA_WORKER_OBJECTIVE is None:
         raise RuntimeError("GA worker is not initialized")
     timer = PerformanceTimer()
-    ordered = [_GA_WORKER_PLACEABLES[i] for i in order]
-    solution = run_container_loop(ordered, _GA_WORKER_CONTAINERS, _GA_WORKER_OBJECTIVE, timer)
-    return order, solution, timer.stages_ms, timer.counters
+    ordered, containers = _decode_signature(signature, _GA_WORKER_PLACEABLES, _GA_WORKER_CONTAINERS)
+    solution = run_container_loop(
+        ordered,
+        containers,
+        _GA_WORKER_OBJECTIVE,
+        timer,
+        observe_industrial=_GA_WORKER_OBSERVE_INDUSTRIAL,
+    )
+    return signature, solution, timer.stages_ms, timer.counters
+
+
+def _decode_signature(
+    signature: tuple[int, ...],
+    placeables: list[_Placeable],
+    containers: list[Container],
+) -> tuple[list[_Placeable], list[Container]]:
+    m = len(placeables)
+    n = len(containers)
+    order = signature[:m]
+    rotation_choices = signature[m:2 * m]
+    container_order = signature[2 * m:2 * m + n]
+    ordered: list[_Placeable] = []
+    for source_index in order:
+        placeable = placeables[source_index]
+        rotations = list(placeable.oriented_rotations)
+        if rotations:
+            offset = rotation_choices[source_index] % len(rotations)
+            rotations = rotations[offset:] + rotations[:offset]
+            placeable = replace(
+                placeable,
+                oriented_rotations=rotations,
+                allowed_rotations=[rotation[0] for rotation in rotations],
+            )
+        ordered.append(placeable)
+    ordered_containers = [containers[index] for index in container_order]
+    return ordered, ordered_containers
 
 
 def _cargo_volume(item: Item) -> float:
@@ -104,9 +142,14 @@ def _make_fitness(
     item_map: dict[str, Item],
     container_map: dict[str, Container],
     advanced_weights: AdvancedScoreWeights | None = None,
+    pallet_map: dict | None = None,
 ):
     """Return a solution fitness function. Higher is better."""
     total_cargo_volume = sum(_cargo_volume(item) * item.quantity for item in item_map.values()) or 1.0
+    total_units = sum(item.quantity for item in item_map.values()) or 1
+    total_must = sum(item.quantity for item in item_map.values() if item.must_load)
+    total_priority = sum((item.priority + 1) * item.quantity for item in item_map.values()) or 1
+    canonical, _profile = resolve_objective(objective_name)
 
     def packed_volume(sol: Solution) -> float:
         return sum(
@@ -197,13 +240,58 @@ def _make_fitness(
     def unpacked_volume(sol: Solution) -> float:
         return sum(_cargo_volume(item_map[item_id]) for item_id in sol.unpacked if item_id in item_map)
 
-    if objective_name in {"min_containers", "transport_cost"}:
+    def common_score(sol: Solution) -> float:
+        unpacked = Counter(sol.unpacked)
+        missing_must = sum(count for item_id, count in unpacked.items() if item_id in item_map and item_map[item_id].must_load)
+        loaded_units = total_units - len(sol.unpacked)
+        loaded_priority = total_priority - sum(
+            (item_map[item_id].priority + 1) * count
+            for item_id, count in unpacked.items()
+            if item_id in item_map
+        )
+        must_quality = 1.0 if total_must == 0 else max(0.0, (total_must - missing_must) / total_must)
+        return must_quality * 1e12 + (loaded_priority / total_priority) * 1e9 + (loaded_units / total_units) * 1e6
+
+    def solution_cost(sol: Solution) -> float:
+        cost = 0.0
+        for loaded in sol.containers:
+            container = container_map.get(loaded.id)
+            cost += container.use_cost if container is not None and container.use_cost is not None else 1.0
+        if pallet_map:
+            pallet_ids = {
+                placement.pallet_id
+                for loaded in sol.containers
+                for placement in loaded.placements
+                if placement.pallet_id
+            }
+            for pallet_id in pallet_ids:
+                pallet = pallet_map.get(str(pallet_id).split("#", 1)[0])
+                if pallet is not None and pallet.handling_cost is not None:
+                    cost += pallet.handling_cost
+        return cost
+
+    def utilization(sol: Solution) -> float:
+        used_capacity = sum(
+            container_map[loaded.id].inner_length * container_map[loaded.id].inner_width * container_map[loaded.id].inner_height
+            for loaded in sol.containers if loaded.id in container_map
+        )
+        return packed_volume(sol) / used_capacity if used_capacity > 0 else 0.0
+
+    if canonical == "cost_efficiency":
         def fitness(sol: Solution) -> float:
-            return -len(sol.containers) * 1e18 + packed_volume(sol)
-    elif objective_name in {"center_of_gravity", "weight_balance"}:
+            return common_score(sol) - solution_cost(sol) * 1e3 + utilization(sol)
+    elif canonical == "space_utilization":
         def fitness(sol: Solution) -> float:
-            return packed_volume(sol) * 1e6 - cog_penalty(sol)
-    elif objective_name in {"advanced_score", "balanced"}:
+            return common_score(sol) + utilization(sol) * 1e3 - len(sol.containers)
+    elif canonical == "safe_loading":
+        def fitness(sol: Solution) -> float:
+            stability_quality = 1.0 - min(stability_penalty(sol), 1.0)
+            balance_quality = 1.0 - min(cog_penalty(sol) / max(len(sol.containers), 1), 1.0)
+            return common_score(sol) + min(stability_quality, balance_quality) * 700.0 + 0.5 * (stability_quality + balance_quality) * 300.0
+    elif canonical == "delivery_sequence":
+        def fitness(sol: Solution) -> float:
+            return common_score(sol) + (1.0 - min(loading_penalty(sol), 1.0)) * 1e3
+    elif canonical == "custom":
         weights = advanced_weights or AdvancedScoreWeights()
 
         def fitness(sol: Solution) -> float:
@@ -214,16 +302,16 @@ def _make_fitness(
             pallet_quality = pallet_ratio(sol)
             missing = unpacked_volume(sol) / total_cargo_volume
             weighted = (
-                weights.space_utilization * utilization
+                weights.cost_efficiency * (1.0 / (1.0 + solution_cost(sol)))
+                + weights.space_utilization * utilization
                 + weights.stability * stability_quality
                 + weights.balance * balance_quality
                 + weights.loading_position * loading_quality
-                + weights.palletization * pallet_quality
             )
-            return weighted - 2.0 * missing - 0.02 * len(sol.containers)
+            return common_score(sol) + 1e3 * (weighted - 2.0 * missing - 0.02 * len(sol.containers))
     else:
         def fitness(sol: Solution) -> float:
-            return packed_volume(sol)
+            return common_score(sol) + packed_volume(sol) / total_cargo_volume
 
     return fitness
 
@@ -275,15 +363,19 @@ def _rank_ga_candidates(
     candidates: dict[tuple, tuple[Solution, float]],
     limit: int,
     seed: int,
+    initial_violations: list | None = None,
 ) -> Solution:
     ranked: list[tuple[Solution, float]] = []
     for sol, fitness_score in candidates.values():
+        industrial_metrics = finalize_solution(request, sol, initial_violations)
         sol.evaluation = evaluate_solution(request, sol)
+        sol.evaluation.metrics.update({key: round(value, 4) for key, value in industrial_metrics.items()})
         sol.alternatives = []
         ranked.append((sol, fitness_score))
 
     ranked.sort(
         key=lambda pair: (
+            {"infeasible": 0, "partial": 1, "feasible": 2}.get(pair[0].status, 0),
             pair[0].evaluation.score if pair[0].evaluation is not None else 0.0,
             pair[1],
         ),
@@ -303,6 +395,9 @@ def _rank_ga_candidates(
                 containers=[c.model_copy(deep=True) for c in sol.containers],
                 unpacked=list(sol.unpacked),
                 evaluation=evaluation.model_copy(deep=True) if evaluation is not None else None,
+                status=sol.status,
+                violations=[violation.model_copy(deep=True) for violation in sol.violations],
+                cost_summary=sol.cost_summary.model_copy(deep=True) if sol.cost_summary is not None else None,
             )
         )
     return primary
@@ -311,6 +406,7 @@ def _rank_ga_candidates(
 def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     """Search placeable order with BRKGA and return the best decoded solution."""
     timer = PerformanceTimer()
+    request, initial_violations = prepare_request(request)
     cfg = config or GAConfig()
     with timer.stage("prepare_objective"):
         objective = get_objective(request.objective, request.advanced_weights)
@@ -321,14 +417,26 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     with timer.stage("prepare_fitness"):
         item_map = {i.id: i for i in request.items}
         container_map = {c.id: c for c in request.containers}
-        fitness = _make_fitness(request.objective, item_map, container_map, getattr(objective, "weights", None))
+        pallet_map = {p.id: p for p in request.pallets}
+        fitness = _make_fitness(
+            request.objective,
+            item_map,
+            container_map,
+            getattr(objective, "weights", None),
+            pallet_map,
+        )
 
     m = len(placeables)
     if m == 0:
         with timer.stage("container_loop"):
-            solution = run_container_loop([], containers, objective, timer)
+            solution = run_container_loop(
+                [], containers, objective, timer,
+                observe_industrial=request.validation_mode == "industrial",
+            )
         with timer.stage("evaluator"):
+            industrial_metrics = finalize_solution(request, solution, initial_violations)
             solution.evaluation = evaluate_solution(request, solution)
+            solution.evaluation.metrics.update({key: round(value, 4) for key, value in industrial_metrics.items()})
         solution.performance = PerformanceMetrics(
             runtime_ms=round(timer.runtime_ms, 3),
             stages_ms=timer.rounded_stages(),
@@ -342,17 +450,28 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     parallel_workers = min(parallel_workers, cfg.population)
 
     rng = np.random.default_rng(cfg.seed)
-    pop = rng.random((cfg.population, m))
-    pop[0] = np.linspace(0.0, 1.0, m)
+    n_containers = len(containers)
+    gene_count = 2 * m + n_containers
+    pop = rng.random((cfg.population, gene_count))
+    pop[0, :m] = np.linspace(0.0, 1.0, m)
+    pop[0, m:2 * m] = 0.0
+    if n_containers:
+        pop[0, 2 * m:] = np.linspace(0.0, 1.0, n_containers)
 
     n_elite = max(1, int(cfg.population * cfg.elite_frac))
     n_mutant = max(1, int(cfg.population * cfg.mutant_frac))
     decode_cache: dict[tuple[int, ...], tuple[Solution, float]] = {}
     executor: ProcessPoolExecutor | None = None
 
-    def decode(order: tuple[int, ...]) -> Solution:
-        ordered = [placeables[i] for i in order]
-        return run_container_loop(ordered, containers, objective, timer)
+    def decode(signature: tuple[int, ...]) -> Solution:
+        ordered, ordered_containers = _decode_signature(signature, placeables, containers)
+        return run_container_loop(
+            ordered,
+            ordered_containers,
+            objective,
+            timer,
+            observe_industrial=request.validation_mode == "industrial",
+        )
 
     def decode_misses(orders: list[tuple[int, ...]]) -> None:
         if executor is None:
@@ -374,7 +493,13 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
         missing_orders: list[tuple[int, ...]] = []
         missing_seen: set[tuple[int, ...]] = set()
         for ind in population:
-            order = tuple(int(i) for i in np.argsort(ind, kind="stable"))
+            item_order = tuple(int(i) for i in np.argsort(ind[:m], kind="stable"))
+            rotation_choices = tuple(
+                min(int(ind[m + i] * max(len(placeables[i].oriented_rotations), 1)), max(len(placeables[i].oriented_rotations) - 1, 0))
+                for i in range(m)
+            )
+            container_order = tuple(int(i) for i in np.argsort(ind[2 * m:], kind="stable"))
+            order = item_order + rotation_choices + container_order
             orders.append(order)
             if order not in decode_cache and order not in missing_seen:
                 timer.count("ga_decode_cache_misses")
@@ -407,7 +532,12 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
             executor = ProcessPoolExecutor(
                 max_workers=parallel_workers,
                 initializer=_init_ga_decode_worker,
-                initargs=(placeables, containers, objective),
+                initargs=(
+                    placeables,
+                    containers,
+                    objective,
+                    request.validation_mode == "industrial",
+                ),
             )
 
         with timer.stage("ga_initial_population"):
@@ -426,12 +556,12 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
 
                 elites = pop[:n_elite]
                 children = [elites]
-                children.append(rng.random((n_mutant, m)))
+                children.append(rng.random((n_mutant, gene_count)))
                 n_cross = cfg.population - n_elite - n_mutant
                 if n_cross > 0:
                     elite_parents = elites[rng.integers(0, n_elite, n_cross)]
                     non_elite_parents = pop[rng.integers(n_elite, cfg.population, n_cross)]
-                    mask = rng.random((n_cross, m)) < cfg.inherit_prob
+                    mask = rng.random((n_cross, gene_count)) < cfg.inherit_prob
                     crossed = np.where(mask, elite_parents, non_elite_parents)
                     children.append(crossed)
                 pop = np.vstack(children)
@@ -454,7 +584,7 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
     timer.count("ga_generations_completed", completed_generations)
 
     with timer.stage("rank_candidates"):
-        solution = _rank_ga_candidates(request, candidates, candidate_limit, cfg.seed)
+        solution = _rank_ga_candidates(request, candidates, candidate_limit, cfg.seed, initial_violations)
     solution.performance = PerformanceMetrics(
         runtime_ms=round(timer.runtime_ms, 3),
         stages_ms=timer.rounded_stages(),

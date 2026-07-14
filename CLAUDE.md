@@ -1,7 +1,7 @@
 # CLAUDE.md — 3D 装箱（容器装载）项目
 
 > 本文件供 Claude Code 在每个会话开始时读取，作为项目上下文。
-> 内容来自需求确认阶段的设计对话，**设计已定，实现尚未开始**。
+> 第 1~8 节是已定的设计约定；第 9 节是阶段路线图与当前状态；第 10 节是工作约定与运行命令。
 
 ---
 
@@ -19,7 +19,7 @@
    用户只录入货品数量和「可用托盘数量」，算法自行决定每件/每批货品是「直接装进容器」还是「先码到托盘再装」，按目标函数择优。不要写死「先码垛再装箱」的两阶段流程。
 
 2. **优化目标可插拔（策略模式），运行时通过参数选择。**
-   目标选项：`max_utilization`（最大空间利用率）/ `min_containers`（最少容器数）/ `stability`（稳定性优先）/ `balanced`（综合平衡）/ `center_of_gravity`（重心居中）。放置评分与方案比较都读取该目标，换目标不改引擎核心。
+   生产目标为 `cost_efficiency`（成本效率）/ `space_utilization`（空间利用）/ `safe_loading`（安全装载）/ `delivery_sequence`（顺序配送）/ `custom`（高级自定义）。旧目标名由后端兼容映射；放置评分、GA 与最终评估必须共用同一目标定义。
 
 3. **多容器自动分配。**
    最外层是多容器求解循环：按用户录入的容器类型与数量自动开箱、装载，直到货品装完或容器用尽；装不下的进入余货清单（unpacked）。
@@ -159,15 +159,26 @@ frontend/
 
 ## 9. 路线图 / 当前状态
 
-- [x] **M1** 数据模型 + 单容器极点装箱 + 单元测试
-- [x] **M2** 多容器循环 + 可插拔目标函数
-- [x] **M3** 「直接装 vs 码托盘」决策
-- [x] **M4** 完整约束（重量/朝向/堆叠承重/重心）
-- [x] **M5** FastAPI `/solve` 接口
-- [x] **M6** React + Three.js 可视化与顺序回放
-- [x] **M7** 2D 俯视装载图、报表导出、GA 优化
+项目共 **四个大阶段**，当前处于 **第四阶段（工业策略重构，进行中）**。
 
-**状态**：M1~M7 全部完成，端到端可用。后续可做：GA 朝向基因、传递式承重、门洞约束、性能优化。
+- [x] **阶段一：基础系统（M1~M7）** — 数据模型、单/多容器极点装箱、「直接装 vs 码托盘」决策、完整约束（重量/朝向/堆叠承重/支撑）、`POST /solve`、React + Three.js 可视化与顺序回放、2D 俯视图、CSV 导出、GA 优化。
+- [x] **阶段二：评估体系与业务扩展** — 0-100 评分与 A~D 等级（整体 + 逐容器局部评分）、GA 多候选方案（`alternatives`）、多客户/顺序配送、装货入口（门洞/侧门/顶开）约束、重心居中目标。详见 `docs/evaluation.md`。
+- [x] **阶段三：性能优化** — 性能计数与 `scripts/benchmark_solver.py` 基准、`find_placement` 热点优化（z 层 + x/y 网格索引、评分下界早停等）、GA 档位/早停/多进程并行、前端分包与性能诊断。1140 件默认样例耗时约 5.4~8.8s。详见 `docs/performance-optimization.md`。
+- [ ] **阶段四：工业策略重构（进行中）** — 生产策略收敛为 `cost_efficiency` / `space_utilization` / `safe_loading` / `delivery_sequence` + `custom`（旧目标名兼容映射）；`validation_mode=standard|industrial`；增量工业载荷上下文（preview/commit）；设备重心范围、地板载荷、纵向载荷曲线硬约束前置；堆垛簇稳定性与固定能力闭环（`restraint_mode`）；48 件快速门禁 + 1140 件工业验收基准。四策略均以 2 个容器装完 1140 件、无工业错误码，耗时 4.5~8.7s。详见 `docs/industrial-strategies.md`。
+
+阶段四内部按第 0~6 步推进（定义与完成标准见 `docs/industrial-strategies.md`）：
+
+| 步骤 | 状态 |
+| --- | --- |
+| 第 0 步 回归基线 | ✅ 完成 |
+| 第 1 步 增量约束上下文 | ✅ 完成 |
+| 第 2 步 硬约束前置 | 🔶 部分：重心/地板载荷/载荷曲线已前置并有固定能力闭环；倾覆裕量在 `restraint_mode=unverified` 下仍仅告警 |
+| 第 3 步 安全装载升级 | 🔶 部分：策略合并 + 装后居中已有；最弱安全项字典序的增量安全搜索未做 |
+| 第 4 步 顺序配送升级 | ✅ 完成：逐站点载荷上下文 + 重心可达区间、直线卸货通道过滤已前置到构造（1140 件重心拒绝 1428→0、重心均衡 63%→79%）；多用的 1 个容器已消除（3→2 箱、成本 6080→4000、体积利用 34.6%→52.0%），与成本策略持平 |
+| 第 5 步 策略对比门禁 | 🔶 部分：48 件门禁 + 1140 件验收基准已建；各策略质量阈值待收紧 |
+| 第 6 步 评估与界面 | 🔶 部分：策略评分与工业提示已展示；`feasible/partial/infeasible` 语义分层与 AntD `destroyOnClose` 迁移待完成 |
+
+**下一步（单一最高优先级）**：第 3 步「安全装载升级」的最弱安全项字典序增量安全搜索。当前 `safe_loading` 只做了策略合并 + 装后居中，放置评分仍是单一标量序；目标是按「当前最弱安全项」（倾覆裕量 / 堆垛簇细长比 / 地板载荷 / 固定能力余量中最紧的那一项）做字典序比较，让每次放置优先改善最紧的那一项。完成标准：1140 件 `safe_loading` 的 `min_tip_stability_margin` 与 `stack_cluster_tip_margin` 转正或显著改善、`risky_stack_cluster_count` 下降、装载完成率与容器数不回退、耗时不显著回退。详见 `docs/industrial-strategies.md`。
 
 ---
 
@@ -188,9 +199,9 @@ pip install -r requirements.txt   # 首次：安装依赖
 python -m pytest                  # 跑全部单元测试（pytest.ini 已配置 testpaths/pythonpath）
 ```
 
-### 当前进度（M1~M7 全部完成）
+### 当前进度
 
-后端 M1~M5+M7引擎（64 个单元测试全绿）+ 前端 M6~M7（React 可视化，已端到端联调通过）。
+整体进度见第 9 节路线图（四阶段，当前在第四阶段）。后端引擎 185 个单元测试全绿；前端 React 可视化端到端联调通过。修改求解目标、GA fitness、托盘化、硬约束或评估公式时，必须同步更新 `docs/evaluation.md` 与 `docs/industrial-strategies.md`。
 
 > 后端测试：`conda run -n packaging python -m pytest backend -q`
 > 启动 API：在 `backend/` 下 `conda run -n packaging uvicorn app.main:app --port 8000`，文档见 `/docs`。

@@ -5,6 +5,11 @@ import { useStore } from '../store/useStore'
 import { calculateCenterOfGravity, formatPercent } from '../utils/cog'
 
 const OBJECTIVE_LABELS = {
+  cost_efficiency: '成本效率',
+  space_utilization: '空间利用',
+  safe_loading: '安全装载',
+  delivery_sequence: '顺序配送',
+  custom: '高级自定义',
   transport_cost: '运输成本优先',
   max_utilization: '运输成本优先',
   min_containers: '最少容器数',
@@ -21,6 +26,7 @@ const OBJECTIVE_LABELS = {
 const GLOBAL_EVALUATION_METRICS = [
   { key: 'loaded_completion', label: '装载完成' },
   { key: 'container_count_score', label: '容器数' },
+  { key: 'cost_efficiency_score', label: '成本效率' },
   { key: 'used_volume_utilization', label: '空间利用' },
   { key: 'stability_score', label: '稳定性' },
   { key: 'balance_score', label: '重心均衡' },
@@ -164,10 +170,24 @@ export default function ResultPanel() {
         <Metric label="重量利用率" value={`${((loaded?.weight_utilization || 0) * 100).toFixed(1)}%`} />
         <Metric label="件数" value={total} />
         {solution.performance && <Metric label="求解耗时" value={formatRuntime(solution.performance.runtime_ms)} />}
+        {solution.cost_summary && (
+          <Metric label="估算成本" value={`${solution.cost_summary.total_cost.toFixed(2)} ${solution.cost_summary.currency}`} />
+        )}
         <Metric label="重心偏移率" value={cog ? formatPercent(cog.offsetRate) : '-'} />
         <Metric label="重心位置" value={cog ? `${cog.x.toFixed(0)}, ${cog.y.toFixed(0)}, ${cog.z.toFixed(0)} cm` : '-'} compact />
+        {(loaded?.industrial_metrics?.stack_cluster_count || 0) > 0 && (
+          <>
+            <Metric label="风险堆垛簇" value={Number(loaded.industrial_metrics.risky_stack_cluster_count || 0).toFixed(0)} />
+            <Metric label="簇倾覆裕量" value={Number(loaded.industrial_metrics.stack_cluster_tip_margin || 0).toFixed(2)} />
+            <Metric label="需纵向固定" value={`${Number(loaded.industrial_metrics.required_stack_longitudinal_restraint_kn || 0).toFixed(2)} kN`} />
+            <Metric label="需横向固定" value={`${Number(loaded.industrial_metrics.required_stack_transverse_restraint_kn || 0).toFixed(2)} kN`} />
+          </>
+        )}
         <div style={{ flex: 1 }} />
         {slowHint && <Tag color="warning">{slowHint}</Tag>}
+        <Tag color={solution.status === 'feasible' ? 'success' : solution.status === 'partial' ? 'warning' : 'error'}>
+          {solution.status === 'feasible' ? '可执行' : solution.status === 'partial' ? '部分装载' : '不可行'}
+        </Tag>
         {solution.unpacked.length > 0 && <Tag color="warning">余货 {solution.unpacked.length} 件</Tag>}
       </div>
 
@@ -214,6 +234,16 @@ export default function ResultPanel() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {solution.violations?.length > 0 && (
+        <div className="evaluation-panel evaluation-warnings">
+          {solution.violations.map((violation, index) => (
+            <span key={`${violation.code}-${index}`}>
+              [{violation.severity === 'error' ? '错误' : '提示'}] {violation.message}
+            </span>
+          ))}
         </div>
       )}
 

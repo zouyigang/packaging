@@ -4,6 +4,7 @@ import { useStore } from '../store/useStore'
 import { orientedDims, colorForItem } from '../three/geometry'
 import { calculateCenterOfGravity } from '../utils/cog'
 import { filterPlacements } from '../utils/customerFilter'
+import { deriveVisiblePalletDecks } from '../utils/palletDecks'
 
 // 2D 俯视装载图：沿 z 轴向下看，画出当前容器各货品在 x-y 平面的投影。
 // 低层先画、高层后画（叠在上面），高度越高描边越深以示层次。
@@ -47,26 +48,10 @@ export default function TopView() {
   const maxZ = Math.max(1, ...boxes.map((b) => b.ztop))
   const cog = useMemo(() => calculateCenterOfGravity(filteredPlacements, itemMap, cdef), [filteredPlacements, itemMap, cdef])
 
-  // 从可见的托盘货品反推各托盘底板（俯视下的 footprint），画在货品下层。
-  const decks = useMemo(() => {
-    const deckGroups = {}
-    for (const b of boxes) {
-      if (!b.p.pallet_id) continue
-      ;(deckGroups[b.p.pallet_id] ||= []).push(b)
-    }
-    return Object.entries(deckGroups)
-      .map(([pid, bs]) => {
-        const pdef = palletMap[pid.split('#')[0]]
-        if (!pdef) return null
-        return {
-          x: Math.min(...bs.map((b) => b.p.x)),
-          y: Math.min(...bs.map((b) => b.p.y)),
-          L: pdef.length,
-          W: pdef.width,
-        }
-      })
-      .filter(Boolean)
-  }, [boxes, palletMap])
+  const decks = useMemo(
+    () => deriveVisiblePalletDecks(filteredPlacements, loaded?.pallet_instances, palletMap),
+    [filteredPlacements, loaded?.pallet_instances, palletMap],
+  )
 
   if (!solution) return <Empty style={{ marginTop: 60 }} description="先求解" />
   if (!loaded || !cdef) return <Empty style={{ marginTop: 60 }} description="无数据" />
@@ -89,9 +74,9 @@ export default function TopView() {
           <line x1={0} y1={W / 2} x2={L} y2={W / 2} stroke="#94a3b8" strokeWidth={L * 0.0012} strokeDasharray={`${L * 0.01} ${L * 0.01}`} />
         </g>
         {/* 托盘底板（画在货品下层） */}
-        {decks.map((d, i) => (
+        {decks.map((d) => (
           <rect
-            key={`deck-${i}`}
+            key={`deck-${d.id}`}
             x={d.x} y={d.y} width={d.L} height={d.W}
             fill="#9c6b3f" fillOpacity={0.35}
             stroke="#5c3d1e" strokeWidth={L * 0.0025} strokeDasharray={`${L * 0.012} ${L * 0.008}`}

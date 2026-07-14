@@ -66,6 +66,25 @@ def test_balanced_pallet_score_allows_dense_multi_item_loads():
     assert obj.should_palletize(load_efficiency=0.3, count_per_pallet=2) is False
 
 
+def test_loading_efficiency_declines_pallet_that_sterilizes_the_column():
+    # 托盘块封顶：净码高只有直接堆叠可达高度的 70%，余下 30% 柱高永久作废。
+    # 装卸效率类目标此时宁可散装，即使托盘本身填得很满。
+    obj = get_objective("delivery_sequence")
+
+    assert obj.should_palletize(0.85, 40, column_efficiency=0.70) is False
+    assert obj.should_palletize(0.85, 40, column_efficiency=0.95) is True
+    # 老的两条判据仍然生效：填充率太低、单托盘只有 1 件，都不码。
+    assert obj.should_palletize(0.30, 40, column_efficiency=0.95) is False
+    assert obj.should_palletize(0.85, 1, column_efficiency=0.95) is False
+
+
+def test_stability_palletizes_even_when_the_column_is_wasted():
+    # 稳定性/安全装载要的是「整块不散」，甘愿付出柱高，故不看 column_efficiency。
+    obj = get_objective("safe_loading")
+
+    assert obj.should_palletize(0.85, 40, column_efficiency=0.30) is True
+
+
 def test_get_objective_applies_advanced_weights():
     obj = get_objective("advanced_score", {"palletization": 0.6})
     assert isinstance(obj, Balanced)

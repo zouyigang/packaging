@@ -24,7 +24,7 @@ from .space import ExtremePointSet, Point
 ScoreFn = Callable[[Box], tuple[float, ...]]
 PointScoreFn = Callable[[Point], tuple[float, ...]]
 PointFn = Callable[[float, float, float], list[Point]]
-HardConstraintFn = Callable[[Box], bool]
+HardConstraintFn = Callable[[Box, str], bool]
 OverlapCandidatesFn = Callable[[Box], list[PlacedItem]]
 OverlapCheckFn = Callable[[Box], bool]
 CounterFn = Callable[[str, int], None]
@@ -69,6 +69,7 @@ def find_placement(
     max_counter_fn: MaxCounterFn | None = None,
     filter_covered_points: bool = True,
     point_score_fn: PointScoreFn | None = None,
+    always_scan_extra_points: bool = False,
 ) -> Candidate | None:
     """遍历极点 × 允许朝向，返回评分最优的可行放置；无解返回 None。
 
@@ -116,11 +117,21 @@ def find_placement(
         attempts.append((score(box), index, point, orientation, box))
 
     def build_attempts(candidate_points: list[Point]) -> list[Attempt]:
+        # 热点：每次调用要给上千个候选箱打分。这里手工展开 add_attempt，省掉每候选一次
+        # 的函数调用与元组解包（生产规模上是 10^6 量级）。语义与 add_attempt 完全一致，
+        # 包括越界候选也照样递增 index。
         attempts: list[Attempt] = []
+        append = attempts.append
+        limit_x = inner_length + 1e-6
+        limit_y = inner_width + 1e-6
+        limit_z = inner_height + 1e-6
         index = 0
         for point in candidate_points:
+            px, py, pz = point
             for orientation, dx, dy, dz in orientations:
-                add_attempt(attempts, index, point, orientation, dx, dy, dz)
+                if px + dx <= limit_x and py + dy <= limit_y and pz + dz <= limit_z:
+                    box: Box = (px, py, pz, dx, dy, dz)
+                    append((score(box), index, point, orientation, box))
                 index += 1
         attempts.sort()
         if counter_fn is not None:
@@ -160,7 +171,7 @@ def find_placement(
                 return False
             if not check_stack_load(box, weight, placed):
                 return False
-        if hard_constraint_fn is not None and not hard_constraint_fn(box):
+        if hard_constraint_fn is not None and not hard_constraint_fn(box, orientation):
             return False
         if best is None or attempt_score < best.score:
             best = Candidate(point=point, orientation=orientation, box=box, score=attempt_score)
@@ -213,7 +224,9 @@ def find_placement(
     if counter_fn is not None and skipped_by_score:
         counter_fn("candidate_boxes_skipped_by_score", skipped_by_score)
 
-    if best is None and extra_points_fn is not None:
+    # Strategy-specific points (balance targets, access zones) may outperform a
+    # feasible ordinary extreme point, so compare them even when an EP exists.
+    if extra_points_fn is not None and (best is None or always_scan_extra_points):
         seen = set(points)
         extra_entries: list[tuple[Point, str, float, float, float]] = []
         for orientation, dx, dy, dz in orientations:

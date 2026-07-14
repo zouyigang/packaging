@@ -12,13 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..models.schemas import Item, Pallet
-from .constraints import PlacedItem, commit_stack_load
+from .constraints import PlacedItem, commit_stack_load, support_links
 from .extreme_point import find_placement
 from .objectives import Objective
 from .space import ExtremePointSet
 
-# 托盘上单件货物的相对放置：item_id, x, y, z(含台面高), orientation
-Content = tuple[str, float, float, float, str]
+# The first five fields preserve the legacy tuple contract. Remaining fields
+# carry per-item geometry and business metadata for mixed-SKU pallets.
+Content = tuple
 
 
 @dataclass
@@ -28,6 +29,8 @@ class PalletLoad:
     footprint_w: float        # 块在 y 方向占用（= 托盘宽）
     total_height: float       # 台面高 + 码放高
     total_weight: float       # cargo weight + pallet tare weight
+    deck_height: float
+    tare_weight: float
     contents: list[Content] = field(default_factory=list)
 
     @property
@@ -89,11 +92,19 @@ def build_pallet_load(
         if cand is None:
             break
         x, y, z, _dx, _dy, dz = cand.box
-        contents.append((item.id, x, y, z + pallet.deck_height, cand.orientation))
+        contents.append((
+            item.id, x, y, z + pallet.deck_height, cand.orientation,
+            item.length, item.width, item.height,
+            item.customer_id, item.order_id, item.destination_id, item.stop_seq,
+            item.must_load, item.priority, item.friction_coefficient, item.weight,
+        ))
         commit_stack_load(cand.box, item.weight, placed)
         placed.append(PlacedItem(
             box=cand.box, weight=item.weight,
             max_load_top=item.max_load_top, item_id=item.id,
+            stacking_type=item.stacking_type,
+            stop_seq=item.stop_seq,
+            supported_by=support_links(cand.box, placed),
         ))
         ep.remove(cand.point)
         ep.add_from_placement(cand.box)
@@ -106,6 +117,8 @@ def build_pallet_load(
         footprint_w=pallet.width,
         total_height=pallet.deck_height + stack_height,
         total_weight=cargo_weight + pallet.tare_weight,
+        deck_height=pallet.deck_height,
+        tare_weight=pallet.tare_weight,
         contents=contents,
     )
 
@@ -115,8 +128,79 @@ def pallet_load_efficiency(load: PalletLoad, item: Item) -> float:
     bounding = load.bounding_volume()
     if bounding <= 0:
         return 0.0
-    cargo = load.count * item.length * item.width * item.height
+    cargo = sum(
+        content[5] * content[6] * content[7] if len(content) >= 8
+        else item.length * item.width * item.height
+        for content in load.contents
+    )
     return cargo / bounding
+
+
+def build_mixed_pallet_load(
+    items: list[Item],
+    pallet: Pallet,
+    objective: Objective,
+    instance_id: str,
+) -> PalletLoad:
+    """Greedily pack compatible unit items onto one pallet."""
+    ep = ExtremePointSet()
+    placed: list[PlacedItem] = []
+    contents: list[Content] = []
+    cargo_weight = 0.0
+    stack_height = 0.0
+    ordered = sorted(
+        items,
+        key=lambda item: (-int(item.must_load), -item.priority, -(item.length * item.width * item.height)),
+    )
+    for item in ordered:
+        if cargo_weight + item.weight > pallet.max_load + 1e-9:
+            continue
+        cand = find_placement(
+            item.length,
+            item.width,
+            item.height,
+            item.allowed_rotations,
+            ep,
+            placed,
+            pallet.length,
+            pallet.width,
+            pallet.max_stack_height,
+            score_fn=objective.placement_score,
+            weight=item.weight,
+        )
+        if cand is None:
+            continue
+        x, y, z, _dx, _dy, dz = cand.box
+        contents.append((
+            item.id, x, y, z + pallet.deck_height, cand.orientation,
+            item.length, item.width, item.height,
+            item.customer_id, item.order_id, item.destination_id, item.stop_seq,
+            item.must_load, item.priority, item.friction_coefficient, item.weight,
+        ))
+        commit_stack_load(cand.box, item.weight, placed)
+        placed.append(PlacedItem(
+            box=cand.box,
+            weight=item.weight,
+            max_load_top=item.max_load_top,
+            item_id=item.id,
+            stacking_type=item.stacking_type,
+            stop_seq=item.stop_seq,
+            supported_by=support_links(cand.box, placed),
+        ))
+        ep.remove(cand.point)
+        ep.add_from_placement(cand.box)
+        cargo_weight += item.weight
+        stack_height = max(stack_height, z + dz)
+    return PalletLoad(
+        pallet_id=instance_id,
+        footprint_l=pallet.length,
+        footprint_w=pallet.width,
+        total_height=pallet.deck_height + stack_height,
+        total_weight=cargo_weight + pallet.tare_weight,
+        deck_height=pallet.deck_height,
+        tare_weight=pallet.tare_weight,
+        contents=contents,
+    )
 
 
 def select_pallet(item: Item, pallets: list[Pallet], objective: Objective) -> Pallet | None:

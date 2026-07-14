@@ -18,6 +18,10 @@ from .geometry import Box
 
 ScoreFn = Callable[[Box], tuple[float, ...]]
 
+# 托盘块封顶（max_load_top=0），码不满的柱高就是永久损失。装卸效率类目标最多容忍
+# 损失 15% 柱高来换「整块叉运」的收益，超过就散装。
+MIN_PALLET_COLUMN_EFFICIENCY = 0.85
+
 
 @dataclass
 class ScoreContext:
@@ -35,19 +39,50 @@ class ScoreContext:
     total_w: float = 0.0  # 已放货物累计质量
     sum_wx: float = 0.0   # Σ 质量 × 中心x
     sum_wy: float = 0.0   # Σ 质量 × 中心y
+    sum_wz: float = 0.0   # Σ 质量 × 中心z
     current_stop_seq: int = 1
     current_customer_id: str = ""
     current_order_id: str = ""
     min_stop_seq: int = 1
     max_stop_seq: int = 1
     delivery_groups: dict[tuple[str, int, str], tuple[float, float, float]] = field(default_factory=dict)
+    # 每换一件待放件、或每次并入新放置更新 delivery_groups，都要 +1；配送簇质心据此失效重算。
+    epoch: int = 0
+    _cluster_cache: tuple[int, tuple[tuple[float, float], ...]] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def cluster_targets(self) -> tuple[tuple[float, float], ...]:
+        """当前待放件所属客户/订单簇的质心，按 epoch 缓存。
+
+        质心在一整次 find_placement 里恒定，而评分函数要对上千个候选箱各调一次，
+        故必须缓存，否则每个候选箱都要重建组键、查字典、重算均值。
+        """
+        cached = self._cluster_cache
+        if cached is not None and cached[0] == self.epoch:
+            return cached[1]
+        targets: list[tuple[float, float]] = []
+        for key in delivery_group_keys(
+            self.current_stop_seq, self.current_customer_id, self.current_order_id
+        ):
+            group = self.delivery_groups.get(key)
+            if not group:
+                continue
+            count, sum_x, sum_y = group
+            if count <= 0:
+                continue
+            targets.append((sum_x / count, sum_y / count))
+        resolved = tuple(targets)
+        self._cluster_cache = (self.epoch, resolved)
+        return resolved
 
 
 @dataclass(frozen=True)
 class AdvancedScoreWeights:
+    cost_efficiency: float = 0.15
     space_utilization: float = 0.35
     stability: float = 0.25
-    palletization: float = 0.15
+    palletization: float = 0.0
     balance: float = 0.15
     loading_position: float = 0.10
 
@@ -72,14 +107,28 @@ class Objective:
         return list(containers)
 
     def order_placeables(self, placeables: list[Any]) -> list[Any]:
-        return sorted(placeables, key=lambda p: p.length * p.width * p.height, reverse=True)
+        return sorted(
+            placeables,
+            key=lambda p: (
+                -int(bool(getattr(p, "must_load", False))),
+                -int(getattr(p, "priority", 0) or 0),
+                -(p.length * p.width * p.height),
+            ),
+        )
 
-    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
+    def should_palletize(
+        self,
+        load_efficiency: float,
+        count_per_pallet: int,
+        column_efficiency: float = 1.0,
+    ) -> bool:
         """是否对某货品采用「先码托盘再装」。
 
         默认 False：单件直接装容器在体积上总是更省（托盘有台面高 + 码放空隙开销），
         故体积/数量类目标不码托盘。托盘的收益主要在搬运与稳定性，见各子类覆写。
-        load_efficiency = 货物体积 / 满托盘包围盒体积；count_per_pallet = 单托盘可码件数。
+        load_efficiency = 货物体积 / 满托盘包围盒体积；count_per_pallet = 单托盘可码件数；
+        column_efficiency = 托盘净码高 / 同货直接堆叠可达净高（托盘块封顶，不足 1 的部分
+        是被它永久废掉的柱高，见 packer._pallet_column_efficiency）。
         """
         return False
 
@@ -102,6 +151,31 @@ class MinContainers(Objective):
         return sorted(containers, key=_volume, reverse=True)
 
 
+class CostEfficiency(MinContainers):
+    """Minimize declared activation cost after mandatory completion goals."""
+
+    name = "cost_efficiency"
+
+    def order_containers(self, containers: list[Container]) -> list[Container]:
+        def key(container: Container) -> tuple[float, float, float]:
+            volume = max(_volume(container), 1.0)
+            cost = container.use_cost
+            if cost is None:
+                return (1.0 / volume, 1.0, -volume)
+            return (cost / volume, cost, -volume)
+
+        return sorted(containers, key=key)
+
+
+class SpaceUtilization(Objective):
+    """Prefer the smallest available capacity that can be filled well."""
+
+    name = "space_utilization"
+
+    def order_containers(self, containers: list[Container]) -> list[Container]:
+        return sorted(containers, key=_volume)
+
+
 class Stability(Objective):
     """稳定性优先：重心尽量低，且优先大底面着地。"""
 
@@ -112,9 +186,26 @@ class Stability(Objective):
         # z 最低优先（低重心）；同高时底面积大者优先（-面积 → 越大越靠前）；再靠里/靠左。
         return (z, -(dx * dy), y, x)
 
-    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
-        # 稳定性优先：把多件松散货物码成整托盘块更稳（降低重心、抗位移）。
+    def should_palletize(
+        self,
+        load_efficiency: float,
+        count_per_pallet: int,
+        column_efficiency: float = 1.0,
+    ) -> bool:
+        # 稳定性优先：把多件松散货物码成整托盘块更稳（降低重心、抗位移），
+        # 为此甘愿付出被托盘块废掉的那部分柱高，故不看 column_efficiency。
         return count_per_pallet >= 2
+
+
+class SafeLoading(Stability):
+    """Combine local stack stability with global horizontal load balance."""
+
+    name = "safe_loading"
+
+    def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
+        # Keep the local search stable and compact; whole-load balance is
+        # corrected by the safe-loading centering pass after construction.
+        return self.placement_score
 
 
 class Balanced(Objective):
@@ -157,7 +248,12 @@ class Balanced(Objective):
         stability = z + dz / area
         return (0.6 * compactness + 0.4 * stability, z, -volume)
 
-    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
+    def should_palletize(
+        self,
+        load_efficiency: float,
+        count_per_pallet: int,
+        column_efficiency: float = 1.0,
+    ) -> bool:
         if count_per_pallet < 2:
             return False
         count_score = min(count_per_pallet / 8.0, 1.0)
@@ -254,6 +350,8 @@ class LoadingEfficiency(Objective):
             placeables,
             key=lambda p: (
                 -max(1, int(getattr(p, "stop_seq", 1) or 1)),
+                -int(bool(getattr(p, "must_load", False))),
+                -int(getattr(p, "priority", 0) or 0),
                 getattr(p, "destination_id", "") or "",
                 getattr(p, "customer_id", "") or "",
                 getattr(p, "order_id", "") or "",
@@ -262,53 +360,100 @@ class LoadingEfficiency(Objective):
         )
 
     def make_scorer(self, ctx: ScoreContext) -> ScoreFn:
+        # 评分函数在每次 find_placement 里要对上千个候选箱各调一次（生产规模上是 10^6 量级），
+        # 因此入口面分派、居中分母、簇质心这些「一件货之内恒定」的量全部提到构造期，
+        # 按入口配置返回特化的闭包。数值与展开前逐位一致。
         sides = ctx.loading_access_sides or ("x_max",)
         single_side = sides[0] if len(sides) == 1 else None
         length = ctx.inner_length or 1.0
         width = ctx.inner_width or 1.0
-        height = ctx.inner_height or 1.0
         has_delivery_stops = ctx.max_stop_seq > ctx.min_stop_seq
+        half_length = ctx.inner_length / 2.0
+        half_width = ctx.inner_width / 2.0
+        stop_span = (ctx.max_stop_seq - ctx.min_stop_seq) or 1
+        min_stop = ctx.min_stop_seq
 
-        def delivery_score(box: Box) -> tuple[float, float]:
-            nearest_depth = min(_normalized_access_depth(box, side, ctx) for side in sides)
-            if has_delivery_stops:
-                stop_pos = (ctx.current_stop_seq - ctx.min_stop_seq) / (ctx.max_stop_seq - ctx.min_stop_seq)
-                station_score = abs(nearest_depth - stop_pos)
-            else:
-                station_score = 0.0
-            return (station_score, _delivery_cluster_score(ctx, box))
+        def stop_pos() -> float:
+            return (ctx.current_stop_seq - min_stop) / stop_span
 
-        def score(box: Box) -> tuple[float, ...]:
-            x, y, z, dx, dy, dz = box
-            area = dx * dy
-            cx = abs((x + dx / 2.0) - ctx.inner_length / 2.0) / length
-            cy = abs((y + dy / 2.0) - ctx.inner_width / 2.0) / width
-            station_score, cluster_score = delivery_score(box)
+        cluster = _delivery_cluster_score
+
+        if single_side is not None:
+            # 单入口时「该面的深度」就是「最近入口深度」，两者不必各算一遍。
+            depth_of = _normalized_depth_fn(single_side, ctx)
 
             if single_side in {"x_min", "x_max"}:
-                depth = _access_depth(box, single_side, ctx) / length
-                lateral = cy
                 if has_delivery_stops:
-                    return (station_score, cluster_score, lateral, z, x, y, -area)
-                return (z, -depth, lateral, cluster_score, x, y, -area)
+                    def score(box: Box) -> tuple[float, ...]:
+                        x, y, z, dx, dy, _dz = box
+                        station = abs(depth_of(box) - stop_pos())
+                        cy = abs((y + dy / 2.0) - half_width) / width
+                        return (station, cluster(ctx, box), cy, z, x, y, -(dx * dy))
+                    return score
+
+                # 端门整箱同站时没有卸货顺序可优化：横向居中会把货堆到宽度中线、
+                # 把两侧压成放不下货的窄条，故改用靠墙贴角键做紧凑填充。同一站点
+                # 内部的卸货顺序由求解器自定，无需保留居中语义。顶开与侧门的居中
+                # 是有意的取货可达性设计（见 test_packer 对应用例），保持不变。
+                def score(box: Box) -> tuple[float, ...]:
+                    x, y, z, dx, dy, _dz = box
+                    return (z, y, -depth_of(box), cluster(ctx, box), x, -(dx * dy))
+                return score
 
             if single_side in {"y_min", "y_max"}:
-                depth = _access_depth(box, single_side, ctx) / width
                 if has_delivery_stops:
-                    return (station_score, cluster_score, cx, z, x, y, -area)
-                return (z, depth, cx, cluster_score, x, y, -area)
+                    def score(box: Box) -> tuple[float, ...]:
+                        x, y, z, dx, dy, _dz = box
+                        station = abs(depth_of(box) - stop_pos())
+                        cx = abs((x + dx / 2.0) - half_length) / length
+                        return (station, cluster(ctx, box), cx, z, x, y, -(dx * dy))
+                    return score
+
+                def score(box: Box) -> tuple[float, ...]:
+                    x, y, z, dx, dy, _dz = box
+                    cx = abs((x + dx / 2.0) - half_length) / length
+                    return (z, depth_of(box), cx, cluster(ctx, box), x, y, -(dx * dy))
+                return score
 
             if single_side == "z_max":
-                top_depth = _access_depth(box, "z_max", ctx) / height
                 if has_delivery_stops:
-                    return (station_score, cluster_score, cx + cy, z, top_depth, -area, x, y)
-                return (z, cx + cy, top_depth, cluster_score, -area, x, y)
+                    def score(box: Box) -> tuple[float, ...]:
+                        x, y, z, dx, dy, _dz = box
+                        station = abs(depth_of(box) - stop_pos())
+                        cx = abs((x + dx / 2.0) - half_length) / length
+                        cy = abs((y + dy / 2.0) - half_width) / width
+                        return (
+                            station, cluster(ctx, box), cx + cy, z,
+                            depth_of(box), -(dx * dy), x, y,
+                        )
+                    return score
 
-            nearest = min(_normalized_access_depth(box, side, ctx) for side in sides)
-            nearest_side = min(sides, key=lambda side: _normalized_access_depth(box, side, ctx))
+                def score(box: Box) -> tuple[float, ...]:
+                    x, y, z, dx, dy, _dz = box
+                    cx = abs((x + dx / 2.0) - half_length) / length
+                    cy = abs((y + dy / 2.0) - half_width) / width
+                    return (
+                        z, cx + cy, depth_of(box), cluster(ctx, box),
+                        -(dx * dy), x, y,
+                    )
+                return score
+
+        ranked_sides = [(_normalized_depth_fn(side, ctx), _side_rank(side)) for side in sides]
+
+        def score(box: Box) -> tuple[float, ...]:
+            x, y, z, dx, dy, _dz = box
+            # min(sides, key=...) 取首个最小者，这里保持同样的先到先得语义。
+            nearest, nearest_rank = min(
+                ((depth(box), rank) for depth, rank in ranked_sides),
+                key=lambda pair: pair[0],
+            )
+            cx = abs((x + dx / 2.0) - half_length) / length
+            cy = abs((y + dy / 2.0) - half_width) / width
+            area = dx * dy
             if has_delivery_stops:
-                return (station_score, cluster_score, _side_rank(nearest_side), cx + cy, z, x, y, -area)
-            return (z, nearest, _side_rank(nearest_side), cx + cy, cluster_score, x, y, -area)
+                station = abs(nearest - stop_pos())
+                return (station, cluster(ctx, box), nearest_rank, cx + cy, z, x, y, -area)
+            return (z, nearest, nearest_rank, cx + cy, cluster(ctx, box), x, y, -area)
 
         return score
 
@@ -316,8 +461,27 @@ class LoadingEfficiency(Objective):
         x, y, z, dx, dy, _dz = box
         return (z, x, y, -(dx * dy))
 
-    def should_palletize(self, load_efficiency: float, count_per_pallet: int) -> bool:
-        return count_per_pallet >= 2 and load_efficiency >= 0.45
+    def should_palletize(
+        self,
+        load_efficiency: float,
+        count_per_pallet: int,
+        column_efficiency: float = 1.0,
+    ) -> bool:
+        # 托盘块封顶：它脚下那根柱子只能码到 max_stack_height，余高全部作废。装卸效率类
+        # 目标愿意为「一次叉走一整块」付出一点柱高，但代价过大时宁可散装堆到容器顶。
+        return (
+            count_per_pallet >= 2
+            and load_efficiency >= 0.45
+            and column_efficiency >= MIN_PALLET_COLUMN_EFFICIENCY
+        )
+
+
+class DeliverySequence(LoadingEfficiency):
+    name = "delivery_sequence"
+
+
+class Custom(Balanced):
+    name = "custom"
 
 
 def delivery_group_keys(stop_seq: int, customer_id: str, order_id: str) -> list[tuple[str, int, str]]:
@@ -330,26 +494,45 @@ def delivery_group_keys(stop_seq: int, customer_id: str, order_id: str) -> list[
 
 
 def _delivery_cluster_score(ctx: ScoreContext, box: Box) -> float:
-    keys = delivery_group_keys(ctx.current_stop_seq, ctx.current_customer_id, ctx.current_order_id)
-    if not keys:
+    targets = ctx.cluster_targets()
+    if not targets:
         return 0.0
     x, y, _z, dx, dy, _dz = box
     bx = x + dx / 2.0
     by = y + dy / 2.0
     denom_x = ctx.inner_length or 1.0
     denom_y = ctx.inner_width or 1.0
-    scores: list[float] = []
-    for key in keys:
-        group = ctx.delivery_groups.get(key)
-        if not group:
-            continue
-        count, sum_x, sum_y = group
-        if count <= 0:
-            continue
-        gx = sum_x / count
-        gy = sum_y / count
-        scores.append(abs(bx - gx) / denom_x + abs(by - gy) / denom_y)
-    return min(scores) if scores else 0.0
+    if len(targets) == 1:  # 绝大多数货只属于一个客户/订单簇，别为它起生成器
+        gx, gy = targets[0]
+        return abs(bx - gx) / denom_x + abs(by - gy) / denom_y
+    return min(
+        abs(bx - gx) / denom_x + abs(by - gy) / denom_y for gx, gy in targets
+    )
+
+
+def _normalized_depth_fn(side: str, ctx: ScoreContext) -> Callable[[Box], float]:
+    """把 _normalized_access_depth 的入口面分派提前到构造期。
+
+    评分函数每个候选箱都要算一次入口深度；原实现每次都要跑一遍字符串比较链，
+    在 10^6 量级的候选上是可观的开销。
+    """
+    length = ctx.inner_length or 1.0
+    width = ctx.inner_width or 1.0
+    height = ctx.inner_height or 1.0
+    inner_length = ctx.inner_length
+    inner_width = ctx.inner_width
+    inner_height = ctx.inner_height
+    if side == "x_min":
+        return lambda box: box[0] / length
+    if side == "x_max":
+        return lambda box: (inner_length - (box[0] + box[3])) / length
+    if side == "y_min":
+        return lambda box: box[1] / width
+    if side == "y_max":
+        return lambda box: (inner_width - (box[1] + box[4])) / width
+    if side == "z_max":
+        return lambda box: (inner_height - (box[2] + box[5])) / height
+    return lambda box: 0.0
 
 
 def _access_depth(box: Box, side: str, ctx: ScoreContext) -> float:
@@ -388,12 +571,22 @@ def _volume(c: Container) -> float:
 transport_cost = MaxUtilization()
 min_containers = MinContainers()
 load_stability = Stability()
-advanced_score = Balanced()
+advanced_score = Balanced(AdvancedScoreWeights(cost_efficiency=0.0, palletization=0.15))
 weight_balance = CenterOfGravity()
 loading_efficiency = LoadingEfficiency()
 multi_customer_delivery = loading_efficiency
+cost_efficiency = CostEfficiency()
+space_utilization = SpaceUtilization()
+safe_loading = SafeLoading()
+delivery_sequence = DeliverySequence()
+custom = Custom()
 
 _REGISTRY: dict[str, Objective] = {
+    "cost_efficiency": cost_efficiency,
+    "space_utilization": space_utilization,
+    "safe_loading": safe_loading,
+    "delivery_sequence": delivery_sequence,
+    "custom": custom,
     "transport_cost": transport_cost,
     "max_utilization": transport_cost,
     "min_containers": min_containers,
@@ -407,9 +600,35 @@ _REGISTRY: dict[str, Objective] = {
     "multi_customer_delivery": multi_customer_delivery,
 }
 
+_CANONICAL_OBJECTIVES: dict[str, tuple[str, str]] = {
+    "cost_efficiency": ("cost_efficiency", "default"),
+    "transport_cost": ("cost_efficiency", "legacy_transport_cost"),
+    "min_containers": ("cost_efficiency", "legacy_min_containers"),
+    "space_utilization": ("space_utilization", "default"),
+    "max_utilization": ("space_utilization", "legacy_max_utilization"),
+    "safe_loading": ("safe_loading", "balanced_safety"),
+    "load_stability": ("safe_loading", "legacy_stability"),
+    "stability": ("safe_loading", "legacy_stability"),
+    "weight_balance": ("safe_loading", "legacy_balance"),
+    "center_of_gravity": ("safe_loading", "legacy_balance"),
+    "delivery_sequence": ("delivery_sequence", "default"),
+    "loading_efficiency": ("delivery_sequence", "legacy_loading"),
+    "multi_customer_delivery": ("delivery_sequence", "legacy_loading"),
+    "custom": ("custom", "default"),
+    "advanced_score": ("custom", "legacy_advanced"),
+    "balanced": ("custom", "legacy_advanced"),
+}
+
+
+def resolve_objective(name: str) -> tuple[str, str]:
+    try:
+        return _CANONICAL_OBJECTIVES[name]
+    except KeyError as exc:
+        raise ValueError(f"未知优化目标: {name!r}，可选: {sorted(_REGISTRY)}") from exc
+
 def get_objective(name: str, advanced_weights: Any | None = None) -> Objective:
-    if name in {"advanced_score", "balanced"} and advanced_weights is not None:
-        return Balanced(_coerce_advanced_weights(advanced_weights))
+    if name in {"advanced_score", "balanced", "custom"} and advanced_weights is not None:
+        return Custom(_coerce_advanced_weights(advanced_weights)) if name == "custom" else Balanced(_coerce_advanced_weights(advanced_weights))
     try:
         return _REGISTRY[name]
     except KeyError as exc:
@@ -425,6 +644,7 @@ def _coerce_advanced_weights(value: Any) -> AdvancedScoreWeights:
         data = dict(value)
     defaults = AdvancedScoreWeights()
     return AdvancedScoreWeights(
+        cost_efficiency=float(data.get("cost_efficiency", defaults.cost_efficiency)),
         space_utilization=float(data.get("space_utilization", defaults.space_utilization)),
         stability=float(data.get("stability", defaults.stability)),
         palletization=float(data.get("palletization", defaults.palletization)),

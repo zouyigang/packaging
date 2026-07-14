@@ -1,7 +1,7 @@
 from app.core.constraints import EPS
 from app.core.geometry import oriented_dims
 from app.core.packer import solve
-from app.models.schemas import Container, Item, SolveRequest
+from app.models.schemas import CogLimits, Container, Item, SolveRequest
 
 
 def _all_placements(sol):
@@ -44,8 +44,8 @@ def test_max_load_top_limits_stacking():
     )
     sol = solve(SolveRequest(items=[base, top], containers=[container]))
     placed_ids = sorted(p.item_id for p in _all_placements(sol))
-    assert placed_ids == ["base"]
-    assert sol.unpacked == ["top", "top"]
+    assert placed_ids == ["base", "top"]
+    assert sol.unpacked == ["top"]
 
 
 def test_no_floating_in_result():
@@ -75,7 +75,7 @@ def test_no_floating_in_result():
         assert supported, f"box at z={z} is floating"
 
 
-def test_heavier_item_not_stacked_on_lighter_support():
+def test_heavier_item_can_stack_when_support_has_declared_capacity():
     light = Item(id="light", length=100, width=100, height=50, weight=5, max_load_top=100)
     heavy = Item(id="heavy", length=100, width=100, height=50, weight=20)
     container = Container(
@@ -86,25 +86,50 @@ def test_heavier_item_not_stacked_on_lighter_support():
     sol = solve(SolveRequest(items=[light, heavy], containers=[container]))
 
     placed_ids = [p.item_id for p in _all_placements(sol)]
-    assert placed_ids == ["light"]
-    assert sol.unpacked == ["heavy"]
+    assert placed_ids == ["light", "heavy"]
+    assert sol.unpacked == []
 
 
-def test_cog_limit_applies_to_max_utilization_strategy():
-    item = Item(id="a", length=600, width=400, height=400, weight=20, quantity=1)
+def test_stack_load_is_propagated_to_lower_support_layers():
+    bottom = Item(id="bottom", length=100, width=100, height=20, weight=10, max_load_top=15)
+    middle = Item(id="middle", length=100, width=100, height=20, weight=10)
+    top = Item(id="top", length=100, width=100, height=20, weight=10)
     container = Container(
+        id="c", inner_length=100, inner_width=100, inner_height=60,
+        max_payload=1000, quantity=1,
+    )
+
+    sol = solve(SolveRequest(items=[bottom, middle, top], containers=[container]))
+
+    assert [p.item_id for p in _all_placements(sol)] == ["bottom", "middle"]
+    assert sol.unpacked == ["top"]
+
+
+def test_cog_limit_is_only_hard_when_container_configures_it():
+    item = Item(id="a", length=600, width=400, height=400, weight=20, quantity=1)
+    unrestricted = Container(
         id="c", inner_length=5900, inner_width=2350, inner_height=2390,
         max_payload=28000, quantity=1,
     )
 
-    sol = solve(SolveRequest(items=[item], containers=[container], objective="max_utilization"))
+    sol = solve(SolveRequest(items=[item], containers=[unrestricted], objective="max_utilization"))
 
     [p] = _all_placements(sol)
     dx, dy, _dz = oriented_dims(item.length, item.width, item.height, p.orientation)
     gx = p.x + dx / 2
     gy = p.y + dy / 2
-    assert abs(gx - container.inner_length / 2) / container.inner_length <= 0.25
-    assert abs(gy - container.inner_width / 2) / container.inner_width <= 0.25
+    assert abs(gx - unrestricted.inner_length / 2) / unrestricted.inner_length > 0.25
+
+    constrained = unrestricted.model_copy(update={"cog_limits": CogLimits(
+        x_min_ratio=0.25, x_max_ratio=0.75,
+        y_min_ratio=0.25, y_max_ratio=0.75,
+        z_max_ratio=1.0,
+    )})
+    constrained_sol = solve(SolveRequest(items=[item], containers=[constrained], objective="max_utilization"))
+    [cp] = _all_placements(constrained_sol)
+    cdx, cdy, _ = oriented_dims(item.length, item.width, item.height, cp.orientation)
+    assert 0.25 <= (cp.x + cdx / 2) / constrained.inner_length <= 0.75
+    assert 0.25 <= (cp.y + cdy / 2) / constrained.inner_width <= 0.75
 
 
 def test_not_stackable_item_cannot_support_other_items():

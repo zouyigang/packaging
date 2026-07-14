@@ -10,6 +10,7 @@ from math import ceil
 
 from ..models.schemas import Container, ContainerEvaluation, Evaluation, Item, Placement, Solution, SolveRequest
 from .geometry import oriented_dims
+from .objectives import resolve_objective
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,31 @@ class _PlacementInfo:
 
 
 _STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
+    "cost_efficiency": {
+        "loaded_completion": 0.40,
+        "cost_efficiency_score": 0.35,
+        "used_volume_utilization": 0.15,
+        "weight_utilization": 0.10,
+    },
+    "space_utilization": {
+        "loaded_completion": 0.40,
+        "used_volume_utilization": 0.40,
+        "container_count_score": 0.10,
+        "weight_utilization": 0.10,
+    },
+    "safe_loading": {
+        "safety_worst_score": 0.50,
+        "stability_score": 0.20,
+        "balance_score": 0.20,
+        "loaded_completion": 0.08,
+        "used_volume_utilization": 0.02,
+    },
+    "delivery_sequence": {
+        "loading_score": 0.50,
+        "loaded_completion": 0.25,
+        "used_volume_utilization": 0.15,
+        "balance_score": 0.10,
+    },
     "transport_cost": {
         "loaded_completion": 0.40,
         "container_count_score": 0.30,
@@ -91,14 +117,14 @@ def evaluate_solution(request: SolveRequest, solution: Solution) -> Evaluation:
     infos = _placement_infos(solution, item_map, container_map)
     metrics = _base_metrics(request, solution, infos)
     objective = request.objective
+    resolved, profile_name = resolve_objective(objective)
 
-    if objective in {"advanced_score", "balanced"}:
+    if objective in {"advanced_score", "balanced", "custom"}:
         weights = request.advanced_weights
         profile = {
-            "loaded_completion": 0.20,
+            "cost_efficiency_score": weights.cost_efficiency if weights else 0.15,
             "used_volume_utilization": weights.space_utilization if weights else 0.35,
             "stability_score": weights.stability if weights else 0.25,
-            "pallet_score": weights.palletization if weights else 0.15,
             "balance_score": weights.balance if weights else 0.15,
             "loading_score": weights.loading_position if weights else 0.10,
         }
@@ -109,6 +135,9 @@ def evaluate_solution(request: SolveRequest, solution: Solution) -> Evaluation:
     warnings = _warnings(metrics, objective)
     return Evaluation(
         objective=objective,
+        objective_requested=objective,
+        objective_resolved=resolved,
+        strategy_profile=profile_name,
         score=round(score, 1),
         grade=_grade(score),
         metrics={key: round(value, 4) for key, value in metrics.items()},
@@ -161,14 +190,18 @@ def _base_metrics(request: SolveRequest, solution: Solution, infos: list[_Placem
     weight_utilization = _ratio(loaded_weight, used_payload) if used_payload > 0 else 1.0
     unpacked_penalty = _ratio(unpacked_volume, total_volume)
 
+    stability_score = _stability_score(infos)
+    balance_score = _balance_score(solution, infos)
     return {
         "loaded_completion": loaded_completion,
         "available_fit_ratio": available_fit_ratio,
         "used_volume_utilization": used_volume_utilization,
         "weight_utilization": weight_utilization,
         "container_count_score": _container_count_score(request, solution, total_volume, total_weight),
-        "stability_score": _stability_score(infos),
-        "balance_score": _balance_score(solution, infos),
+        "cost_efficiency_score": _cost_efficiency_score(request, solution, total_volume, total_weight),
+        "stability_score": stability_score,
+        "balance_score": balance_score,
+        "safety_worst_score": min(stability_score, balance_score),
         "loading_score": _loading_score(infos),
         "pallet_score": _pallet_score(infos),
         "unpacked_penalty": unpacked_penalty,
@@ -186,6 +219,7 @@ def _container_evaluations(
     for container_index, loaded in enumerate(solution.containers):
         container_infos = infos_by_container.get(container_index, [])
         metrics = _container_metrics(container_infos)
+        metrics.update(loaded.industrial_metrics)
         score = _weighted_score(metrics, profile)
         evaluations.append(ContainerEvaluation(
             index=container_index,
@@ -206,8 +240,10 @@ def _container_metrics(infos: list[_PlacementInfo]) -> dict[str, float]:
             "used_volume_utilization": 0.0,
             "weight_utilization": 0.0,
             "container_count_score": 1.0,
+            "cost_efficiency_score": 1.0,
             "stability_score": 1.0,
             "balance_score": 1.0,
+            "safety_worst_score": 1.0,
             "loading_score": 1.0,
             "pallet_score": 1.0,
             "unpacked_penalty": 0.0,
@@ -216,14 +252,18 @@ def _container_metrics(infos: list[_PlacementInfo]) -> dict[str, float]:
     loaded_volume = sum(info.volume for info in infos)
     loaded_weight = sum(info.item.weight for info in infos)
     container_volume = container.inner_length * container.inner_width * container.inner_height
+    stability_score = _stability_score(infos)
+    balance_score = _balance_score_from_infos(infos)
     return {
         "loaded_completion": 1.0,
         "available_fit_ratio": 1.0,
         "used_volume_utilization": _ratio(loaded_volume, container_volume),
         "weight_utilization": _ratio(loaded_weight, container.max_payload),
         "container_count_score": 1.0,
-        "stability_score": _stability_score(infos),
-        "balance_score": _balance_score_from_infos(infos),
+        "cost_efficiency_score": 1.0,
+        "stability_score": stability_score,
+        "balance_score": balance_score,
+        "safety_worst_score": min(stability_score, balance_score),
         "loading_score": _loading_score(infos),
         "pallet_score": _pallet_score(infos),
         "unpacked_penalty": 0.0,
@@ -245,6 +285,48 @@ def _container_count_score(
     weight_lb = ceil(total_weight / max_payload) if max_payload > 0 and total_weight > 0 else 1
     lower_bound = max(1, volume_lb, weight_lb)
     return _clamp(lower_bound / used)
+
+
+def _cost_efficiency_score(
+    request: SolveRequest,
+    solution: Solution,
+    total_volume: float,
+    total_weight: float,
+) -> float:
+    if not request.items:
+        return 1.0
+    container_map = {container.id: container for container in request.containers}
+    actual = 0.0
+    for loaded in solution.containers:
+        container = container_map.get(loaded.id)
+        actual += container.use_cost if container is not None and container.use_cost is not None else 1.0
+    pallet_map = {pallet.id: pallet for pallet in request.pallets}
+    seen_pallets = {
+        placement.pallet_id
+        for loaded in solution.containers
+        for placement in loaded.placements
+        if placement.pallet_id
+    }
+    for pallet_id in seen_pallets:
+        pallet = pallet_map.get(str(pallet_id).split("#", 1)[0])
+        if pallet is not None and pallet.handling_cost is not None:
+            actual += pallet.handling_cost
+    if actual <= 0:
+        return 1.0
+
+    lower_bounds: list[float] = []
+    for container in request.containers:
+        volume = container.inner_length * container.inner_width * container.inner_height
+        if volume <= 0:
+            continue
+        volume_count = ceil(total_volume / volume) if total_volume > 0 else 1
+        weight_count = ceil(total_weight / container.max_payload) if total_weight > 0 else 1
+        required = max(1, volume_count, weight_count)
+        if required <= container.quantity:
+            cost = container.use_cost if container.use_cost is not None else 1.0
+            lower_bounds.append(required * cost)
+    theoretical = min(lower_bounds) if lower_bounds else min(actual, 1.0)
+    return _clamp(theoretical / actual)
 
 
 def _stability_score(infos: list[_PlacementInfo]) -> float:

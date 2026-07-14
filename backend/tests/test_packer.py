@@ -130,7 +130,7 @@ def test_seq_respects_x_min_loading_access():
     assert [p.seq for p in loaded.placements] == [1, 2]
 
 
-def test_door_height_is_not_enforced_yet():
+def test_door_height_rejects_item_that_cannot_pass_opening():
     item = Item(
         id="a", length=50, width=50, height=100, quantity=1,
         allowed_rotations=["LWH"],
@@ -142,7 +142,7 @@ def test_door_height_is_not_enforced_yet():
 
     loaded = pack_single_container([item], container)
 
-    assert len(loaded.placements) == 1
+    assert loaded.placements == []
 
 def test_loading_efficiency_single_front_door_places_toward_far_end():
     item = Item(id="a", length=100, width=100, height=100, quantity=1)
@@ -196,3 +196,20 @@ def test_loading_efficiency_top_access_prefers_centered_low_placement():
     placement = loaded.placements[0]
 
     assert (placement.x, placement.y, placement.z) == (100.0, 100.0, 0.0)
+
+
+def test_end_door_single_stop_packs_against_the_wall_instead_of_centering():
+    # 端门容器内全部货物同站时没有卸货顺序可优化：横向居中会把货堆到宽度中线，
+    # 两侧留下放不下货的窄条。此时应贴墙紧凑填充，让同宽度能多排一列。
+    items = [Item(id="a", length=100, width=100, height=100, quantity=6)]
+    container = Container(
+        id="c", inner_length=300, inner_width=300, inner_height=100,
+        max_payload=10000, quantity=1, loading_accesses=[{"side": "x_max"}],
+    )
+
+    loaded = pack_single_container(items, container, "delivery_sequence")
+
+    assert len(loaded.placements) == 6
+    ys = {placement.y for placement in loaded.placements}
+    assert 0.0 in ys  # 贴墙起排，而不是从 y=100 的中线起排
+    assert all(placement.z == 0.0 for placement in loaded.placements)

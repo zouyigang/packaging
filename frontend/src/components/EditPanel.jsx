@@ -21,6 +21,16 @@ const LOADING_ACCESS_OPTIONS = [
 const DEFAULT_LOADING_ACCESS = [
   { side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null },
 ]
+const EQUIPMENT_PROFILE_OPTIONS = [
+  { value: 'generic', label: '通用容器' },
+  { value: 'iso_container', label: 'ISO 集装箱' },
+  { value: 'road_vehicle', label: '道路车辆' },
+]
+const RESTRAINT_MODE_OPTIONS = [
+  { value: 'unverified', label: '未核验（仅告警）' },
+  { value: 'none', label: '无固定装置' },
+  { value: 'rated', label: '额定固定能力' },
+]
 const itemFields = [
   { key: 'name', label: '名称', type: 'text' },
   { key: 'length', label: '长(cm)', type: 'number' },
@@ -36,6 +46,10 @@ const itemFields = [
   { key: 'order_id', label: '订单', type: 'text' },
   { key: 'destination_id', label: '目的地', type: 'text' },
   { key: 'stop_seq', label: '卸货顺序', type: 'number', min: 1 },
+  { key: 'must_load', label: '必须装载', type: 'bool' },
+  { key: 'priority', label: '业务优先级', type: 'number', min: 0 },
+  { key: 'pallet_group', label: '混托兼容组', type: 'text' },
+  { key: 'friction_coefficient', label: '摩擦系数', type: 'number', min: 0 },
 ]
 
 const palletFields = [
@@ -47,6 +61,8 @@ const palletFields = [
   { key: 'max_stack_height', label: '限高(cm)', type: 'number' },
   { key: 'max_load', label: '限重(kg)', type: 'number' },
   { key: 'quantity', label: '数量', type: 'number' },
+  { key: 'handling_cost', label: '处理成本', type: 'number' },
+  { key: 'friction_coefficient', label: '摩擦系数', type: 'number', min: 0 },
 ]
 
 const containerFields = [
@@ -55,38 +71,54 @@ const containerFields = [
   { key: 'inner_width', label: '内宽(cm)', type: 'number' },
   { key: 'inner_height', label: '内高(cm)', type: 'number' },
   { key: 'max_payload', label: '载重(kg)', type: 'number' },
+  { key: 'equipment_profile', label: '设备模板', type: 'select', options: EQUIPMENT_PROFILE_OPTIONS, defaultValue: 'generic' },
+  { key: 'use_cost', label: '启用成本', type: 'number' },
+  { key: 'max_floor_load_kg_m2', label: '地板载荷(kg/m²)', type: 'number' },
+  { key: 'default_friction_coefficient', label: '默认摩擦系数', type: 'number' },
+  { key: 'restraint_mode', label: '堆垛固定模式', type: 'select', options: RESTRAINT_MODE_OPTIONS, defaultValue: 'unverified' },
+  { key: 'longitudinal_restraint_capacity_kn', label: '纵向固定能力(kN)', type: 'number', min: 0 },
+  { key: 'transverse_restraint_capacity_kn', label: '横向固定能力(kN)', type: 'number', min: 0 },
+  { key: 'cog_x_min_ratio', label: '重心X下限(0-1)', type: 'number' },
+  { key: 'cog_x_max_ratio', label: '重心X上限(0-1)', type: 'number' },
+  { key: 'cog_y_min_ratio', label: '重心Y下限(0-1)', type: 'number' },
+  { key: 'cog_y_max_ratio', label: '重心Y上限(0-1)', type: 'number' },
+  { key: 'cog_z_max_ratio', label: '重心Z上限(0-1)', type: 'number' },
+  { key: 'longitudinal_g', label: '纵向加速度(g)', type: 'number' },
+  { key: 'transverse_g', label: '横向加速度(g)', type: 'number' },
+  { key: 'vertical_g', label: '垂向加速度(g)', type: 'number' },
+  { key: 'load_distribution_curve_json', label: '载荷曲线JSON', type: 'text' },
   { key: 'loading_accesses', label: '装货入口', type: 'loading_accesses', options: LOADING_ACCESS_OPTIONS, defaultValue: DEFAULT_LOADING_ACCESS },
   { key: 'quantity', label: '数量', type: 'number', min: 1 },
 ]
 
 const PRODUCTION_OBJECTIVES = [
   {
-    value: 'transport_cost',
-    label: '运输成本优先',
-    description: '尽量少用容器/车辆，优先提高装载率，适合以运费和箱量为主要考核的发运场景。',
+    value: 'cost_efficiency',
+    label: '成本效率',
+    description: '完成必装与优先货物后，最小化容器启用成本和托盘处理成本。',
   },
   {
-    value: 'load_stability',
-    label: '装载稳定优先',
-    description: '更偏好低重心、大底面、少堆高，适合易损货、重货或对运输稳定性要求更高的场景。',
+    value: 'space_utilization',
+    label: '空间利用',
+    description: '优先选择最佳适配容器，提高已使用容器的体积利用率。',
   },
   {
-    value: 'weight_balance',
-    label: '重心均衡优先',
-    description: '更关注前后/左右重量均衡，减少偏载风险，适合集装箱、车辆和长距离运输。',
+    value: 'safe_loading',
+    label: '安全装载',
+    description: '同时优化堆垛稳定、承重裕量和整体载荷分布。',
   },
   {
-    value: 'loading_efficiency',
-    label: '装卸/多客户配送优先',
-    description: '按装货入口和卸货顺序安排位置，同一站点内尽量聚集相同客户或订单的货品。',
+    value: 'delivery_sequence',
+    label: '顺序配送',
+    description: '保证按站点直接卸货、禁止倒货，并检查卸货后的剩余载荷。',
   },
 ]
 
 const ADVANCED_OBJECTIVES = [
   {
-    value: 'advanced_score',
-    label: '综合评分',
-    description: '高级模式：在装载率、稳定性、托盘化和位置评分之间做折中，适合需要调试算法效果的场景。',
+    value: 'custom',
+    label: '高级自定义',
+    description: '在安全硬约束下自定义成本、空间、稳定、均衡与装卸权重。',
   },
 ]
 
@@ -96,9 +128,9 @@ const OBJECTIVES = [
 ]
 const FLAT_OBJECTIVES = [...PRODUCTION_OBJECTIVES, ...ADVANCED_OBJECTIVES]
 const ADVANCED_WEIGHT_FIELDS = [
+  { key: 'cost_efficiency', label: '成本效率' },
   { key: 'space_utilization', label: '空间利用' },
   { key: 'stability', label: '稳定性' },
-  { key: 'palletization', label: '托盘化' },
   { key: 'balance', label: '重心均衡' },
   { key: 'loading_position', label: '装卸位置' },
 ]
@@ -120,7 +152,7 @@ function objectiveMeta(value) {
 }
 
 function isAdvancedObjective(value) {
-  return value === 'advanced_score' || value === 'balanced'
+  return value === 'custom' || value === 'advanced_score' || value === 'balanced'
 }
 
 export default function EditPanel() {
@@ -136,6 +168,12 @@ export default function EditPanel() {
   const setUseGa = useStore((s) => s.setUseGa)
   const gaSpeed = useStore((s) => s.gaSpeed)
   const setGaSpeed = useStore((s) => s.setGaSpeed)
+  const validationMode = useStore((s) => s.validationMode)
+  const setValidationMode = useStore((s) => s.setValidationMode)
+  const palletPolicy = useStore((s) => s.palletPolicy)
+  const setPalletPolicy = useStore((s) => s.setPalletPolicy)
+  const costCurrency = useStore((s) => s.costCurrency)
+  const setCostCurrency = useStore((s) => s.setCostCurrency)
   const selectedObjective = objectiveMeta(objective)
   const solveButtonText = loading
     ? (useGa ? `GA ${GA_SPEED_LABELS[gaSpeed] || '标准'}模式求解中` : `${selectedObjective.label}求解中`)
@@ -201,6 +239,32 @@ export default function EditPanel() {
             </div>
           )}
           <div className="solve-actions">
+            <Select
+              size="small"
+              value={validationMode}
+              onChange={setValidationMode}
+              options={[{ value: 'standard', label: '标准校验' }, { value: 'industrial', label: '工业校验' }]}
+              style={{ width: 100 }}
+            />
+            <Select
+              size="small"
+              value={palletPolicy}
+              onChange={setPalletPolicy}
+              options={[
+                { value: 'auto', label: '托盘自动' },
+                { value: 'prefer', label: '偏好托盘' },
+                { value: 'avoid', label: '避免托盘' },
+                { value: 'required', label: '必须托盘' },
+              ]}
+              style={{ width: 100 }}
+            />
+            <Select
+              size="small"
+              value={costCurrency}
+              onChange={setCostCurrency}
+              options={['CNY', 'USD', 'EUR'].map((value) => ({ value, label: value }))}
+              style={{ width: 72 }}
+            />
             <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
               <Space size={6}>
                 <Switch size="small" checked={useGa} onChange={setUseGa} />

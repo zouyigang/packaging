@@ -683,7 +683,7 @@ function getSummary(row, fields) {
 }
 
 function getChips(row, fields) {
-  const keys = ['quantity', 'weight', 'tare_weight', 'stacking_type', 'allowed_rotations', 'max_payload', 'loading_accesses', 'max_load', 'max_stack_height', 'deck_height']
+  const keys = ['quantity', 'must_load', 'priority', 'weight', 'tare_weight', 'stacking_type', 'allowed_rotations', 'equipment_profile', 'max_payload', 'loading_accesses', 'max_load', 'max_stack_height', 'deck_height']
   return keys
     .map((key) => {
       const field = fields.find((f) => f.key === key)
