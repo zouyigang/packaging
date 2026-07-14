@@ -87,18 +87,20 @@ QUALITY_BASELINES: dict[str, dict[str, float]] = {
         "risky_stack_cluster_count": 10, "max_stack_cluster_slenderness": 7.5,
         "required_restraint_kn": 23.94,
     },
-    # 1140 件工业验收
+    # 1140 件工业验收。成本/空间策略会挑 40GP：1 只 40GP 取代 2 只 20GP，成本 4000 → 3400。
+    # 代价是货堆得更高——危险堆垛簇 26 → 30、所需固定力 14.46 → 14.70 kN；细长比反而降到 9。
+    # 安全与配送策略不做类型选择（目标不是成本），仍用 2 只 20GP，基线未变。
     "industrial_large_cost_efficiency": {
-        "container_count": 2, "total_cost": 4000, "volume_utilization": 0.5197,
-        "stability_score": 0.4321, "loading_score": 0.4891,
-        "risky_stack_cluster_count": 26, "max_stack_cluster_slenderness": 10.5,
-        "required_restraint_kn": 14.46,
+        "container_count": 1, "total_cost": 3400, "volume_utilization": 0.5097,
+        "stability_score": 0.4413, "loading_score": 0.4945,
+        "risky_stack_cluster_count": 30, "max_stack_cluster_slenderness": 9.0,
+        "required_restraint_kn": 14.70,
     },
     "industrial_large_space_utilization": {
-        "container_count": 2, "total_cost": 4000, "volume_utilization": 0.5197,
-        "stability_score": 0.4321, "loading_score": 0.4891,
-        "risky_stack_cluster_count": 26, "max_stack_cluster_slenderness": 10.5,
-        "required_restraint_kn": 14.46,
+        "container_count": 1, "total_cost": 3400, "volume_utilization": 0.5097,
+        "stability_score": 0.4413, "loading_score": 0.4945,
+        "risky_stack_cluster_count": 30, "max_stack_cluster_slenderness": 9.0,
+        "required_restraint_kn": 14.70,
     },
     "industrial_large_safe_loading": {
         "container_count": 2, "total_cost": 4080, "volume_utilization": 0.5197,
@@ -308,7 +310,22 @@ def _frontend_default_request(objective: str = "center_of_gravity", use_ga: bool
                 max_payload=28000,
                 loading_accesses=[LoadingAccess(side="x_max")],
                 quantity=10,
-            )
+                use_cost=2000,
+            ),
+            # 第二种设备类型：40GP。单位体积更便宜（50.3/m³ 对 20GP 的 60.4/m³），
+            # 成本策略据此可以用 1 只 40GP 取代 2 只 20GP。多类型混装的取舍见
+            # run_container_loop 的开箱选择。
+            Container(
+                id="cntr40",
+                name="40GP",
+                inner_length=12030,
+                inner_width=2350,
+                inner_height=2390,
+                max_payload=26700,
+                loading_accesses=[LoadingAccess(side="x_max")],
+                quantity=5,
+                use_cost=3400,
+            ),
         ],
         objective=objective,
         use_ga=use_ga,
@@ -394,7 +411,6 @@ def _frontend_industrial_request(objective: str) -> SolveRequest:
     for pallet in request.pallets:
         pallet.handling_cost = 20
     for container in request.containers:
-        container.use_cost = 2000
         container.equipment_profile = "road_vehicle"
         container.cog_limits = CogLimits(
             x_min_ratio=0.15,

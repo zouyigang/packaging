@@ -1710,6 +1710,62 @@ def _expand_containers(request: SolveRequest, objective: Objective) -> list[Cont
     return available
 
 
+def _container_cost(container: Container) -> float:
+    """未申报成本时用 1.0 代理（与 industrial.finalize_solution 的成本代理口径一致）。"""
+    return container.use_cost if container.use_cost is not None else 1.0
+
+
+def _score_cost_trials(cost_trials: list[dict], available: list[Container]) -> list[tuple]:
+    """成本策略的开箱选择：按「装完全部货物总共要花多少钱」排序，而不是「这一箱每元装几件」。
+
+    原来的键是 `装载件数 / 本箱成本`，这是近视的：小箱单价装载效率高、却装不完，
+    于是被选中，反倒逼出多余的一只箱（实测 40GP+20GP+20GP=7400，而 40GP+40GP=6800）。
+    关键在于**装不完是要额外花钱的**——余货非空时至少还得再开一只箱。
+
+    余货的成本按各类型试装中实测到的最优「每单位装载体积成本」折算。必须用实测装载
+    体积而不是容器标称体积：后者等于假设 100% 填充，会把余货的代价低估一半以上，
+    进而又选回那只装不完的小箱。
+    """
+    if not cost_trials:
+        return []
+
+    # 各类型实测的单位装载体积成本，取最优者作为余货的折算价。
+    best_cost_per_volume = min(
+        (
+            _container_cost(trial["container"]) / packed
+            for trial in cost_trials
+            if (packed := _packed_volume(trial["loaded"], trial["container"])) > EPS
+        ),
+        default=0.0,
+    )
+    cheapest_cost = min((_container_cost(c) for c in available), default=0.0)
+
+    scored: list[tuple] = []
+    for trial in cost_trials:
+        cost = _container_cost(trial["container"])
+        leftover = trial["remaining"]
+        if leftover:
+            leftover_volume = sum(pl.volume for pl in leftover)
+            # 下界不低于「最便宜的一只箱」：余货非空就一定还要再开一只。
+            estimate = cost + max(cheapest_cost, leftover_volume * best_cost_per_volume)
+        else:
+            estimate = cost
+        key = (
+            -estimate,
+            trial["priority_value"],
+            trial["placed_count"],
+            trial["loaded"].volume_utilization,
+        )
+        scored.append((key, trial["index"], trial["loaded"], trial["remaining"]))
+    return scored
+
+
+def _packed_volume(loaded: LoadedContainer, container: Container) -> float:
+    return loaded.volume_utilization * (
+        container.inner_length * container.inner_width * container.inner_height
+    )
+
+
 def run_container_loop(
     placeables: list[_Placeable],
     containers: list[Container],
@@ -1728,6 +1784,9 @@ def run_container_loop(
     while available and remaining:
         if objective.name in {"cost_efficiency", "space_utilization"}:
             trials: list[tuple[tuple[float, ...], int, LoadedContainer, list[_Placeable]]] = []
+            # 成本策略先把各类型的试装结果收齐，再统一打分——单位体积成本必须用
+            # 实测装载体积算，用容器标称体积会当成 100% 填充，严重低估余货的代价。
+            cost_trials: list[dict] = []
             seen_types: set[tuple] = set()
             for index, candidate_container in enumerate(available):
                 signature = (
@@ -1755,11 +1814,20 @@ def run_container_loop(
                     if id(pl) not in leftover_ids
                 )
                 if objective.name == "cost_efficiency":
-                    cost = candidate_container.use_cost if candidate_container.use_cost is not None else 1.0
-                    key = (priority_value / max(cost, EPS), placed_count / max(cost, EPS), trial_loaded.volume_utilization)
+                    cost_trials.append({
+                        "container": candidate_container,
+                        "index": index,
+                        "loaded": trial_loaded,
+                        "remaining": trial_remaining,
+                        "placed_count": placed_count,
+                        "priority_value": priority_value,
+                    })
                 else:
                     key = (trial_loaded.volume_utilization, priority_value, placed_count)
-                trials.append((key, index, trial_loaded, trial_remaining))
+                    trials.append((key, index, trial_loaded, trial_remaining))
+
+            if objective.name == "cost_efficiency":
+                trials = _score_cost_trials(cost_trials, available)
             if not trials:
                 break
             _key, selected_index, loaded, next_remaining = max(trials, key=lambda trial: trial[0])

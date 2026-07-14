@@ -68,9 +68,18 @@ test('顺序回放：重置清空、播放逐件加回', async ({ page }) => {
   await expect(page.getByTestId('topview-box')).toHaveCount(0)
 
   // 播放：画面必须真的逐件长回来，而不是一步到位。
+  // （不等它播完——每件 200ms，上千件要几分钟；确认在推进即可。）
   await playButton(page).click()
   await expect(page.getByTestId('topview-box')).not.toHaveCount(0)
-  await expect(page.getByTestId('topview-box')).toHaveCount(total, { timeout: 60_000 })
+  const partial = await page.getByTestId('topview-box').count()
+  expect(partial).toBeLessThan(total)
+  await playButton(page).click()  // 暂停
+
+  // 拖到末尾：全部货品都在。
+  await page.locator('.playback-row .ant-slider-handle').click()
+  await page.keyboard.press('End')
+  await expect(page.locator('.playback-count')).toHaveText(`${total} / ${total}`)
+  await expect(page.getByTestId('topview-box')).toHaveCount(total)
 })
 
 test('导出 CSV：文件名、表头与行数与方案一致', async ({ page }) => {

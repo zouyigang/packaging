@@ -97,7 +97,9 @@ const samplePallets = [
   { id: 'plt', name: '标准托盘', length: 1200, width: 1000, tare_weight: 10, deck_height: 150, max_stack_height: 1500, max_load: 1000, quantity: 4, handling_cost: null, friction_coefficient: null },
 ]
 const sampleContainers = [
-  { id: 'cntr', name: '20GP', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 10, equipment_profile: 'iso_container', use_cost: null, max_floor_load_kg_m2: null, default_friction_coefficient: null, restraint_mode: 'unverified', longitudinal_restraint_capacity_kn: null, transverse_restraint_capacity_kn: null, load_distribution_curve_json: '' },
+  { id: 'cntr', name: '20GP', inner_length: 5900, inner_width: 2350, inner_height: 2390, max_payload: 28000, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 10, equipment_profile: 'iso_container', use_cost: 2000, max_floor_load_kg_m2: null, default_friction_coefficient: null, restraint_mode: 'unverified', longitudinal_restraint_capacity_kn: null, transverse_restraint_capacity_kn: null, load_distribution_curve_json: '' },
+  // 第二种设备类型：40GP 单位体积更便宜，成本策略可用 1 只 40GP 取代 2 只 20GP。
+  { id: 'cntr40', name: '40GP', inner_length: 12030, inner_width: 2350, inner_height: 2390, max_payload: 26700, loading_accesses: [{ side: 'x_max', door_width: null, door_height: null, opening_start: null, opening_end: null }], door_width: null, door_height: null, quantity: 5, equipment_profile: 'iso_container', use_cost: 3400, max_floor_load_kg_m2: null, default_friction_coefficient: null, restraint_mode: 'unverified', longitudinal_restraint_capacity_kn: null, transverse_restraint_capacity_kn: null, load_distribution_curve_json: '' },
 ]
 
 export const useStore = create((set, get) => ({
