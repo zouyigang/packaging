@@ -5,6 +5,9 @@ from app.core.packer import solve
 from app.models.schemas import Container, Item, SolveRequest
 from scripts.benchmark_solver import (
     INDUSTRIAL_STRATEGIES,
+    QUALITY_BASELINES,
+    QUALITY_TOLERANCES,
+    _check_quality_gate,
     _frontend_industrial_request,
     _industrial_strategy_request,
     _quality_summary,
@@ -98,3 +101,52 @@ def test_large_industrial_benchmark_matches_frontend_scale_and_has_required_equi
     assert all(container.max_floor_load_kg_m2 is not None for container in request.containers)
     assert all(container.acceleration_profile is not None for container in request.containers)
     assert all(container.default_friction_coefficient is not None for container in request.containers)
+
+
+def test_quality_gate_passes_on_the_current_baseline():
+    for strategy in INDUSTRIAL_STRATEGIES:
+        request = _industrial_strategy_request(strategy)
+        quality = _quality_summary(request, solve(request))
+        assert _check_quality_gate(f"industrial_{strategy}", quality) == []
+
+
+def test_quality_gate_flags_a_degraded_metric_in_each_direction():
+    request = _industrial_strategy_request("safe_loading")
+    quality = _quality_summary(request, solve(request))
+
+    # 越小越好的指标变大：多用一个容器（正是曾经靠人工比对才发现的那类回归）。
+    worse = dict(quality, container_count=quality["container_count"] + 1)
+    breaches = _check_quality_gate("industrial_safe_loading", worse)
+    assert any("container_count" in breach for breach in breaches)
+
+    # 越大越好的指标变小：体积利用率掉一半。
+    worse = dict(quality, volume_utilization=quality["volume_utilization"] / 2)
+    breaches = _check_quality_gate("industrial_safe_loading", worse)
+    assert any("volume_utilization" in breach for breach in breaches)
+
+    # 固定力是纵向 + 横向之和，两项任一变差都要报。
+    worse = dict(quality, required_stack_longitudinal_restraint_kn=99.0)
+    breaches = _check_quality_gate("industrial_safe_loading", worse)
+    assert any("required_restraint_kn" in breach for breach in breaches)
+
+
+def test_quality_gate_tolerates_noise_but_not_a_real_slide():
+    request = _industrial_strategy_request("cost_efficiency")
+    quality = _quality_summary(request, solve(request))
+
+    within = dict(quality, stability_score=quality["stability_score"] * 0.99)
+    assert _check_quality_gate("industrial_cost_efficiency", within) == []
+
+    beyond = dict(quality, stability_score=quality["stability_score"] * 0.90)
+    assert _check_quality_gate("industrial_cost_efficiency", beyond) != []
+
+
+def test_every_benchmark_case_has_a_quality_baseline():
+    expected = {f"industrial_{strategy}" for strategy in INDUSTRIAL_STRATEGIES}
+    expected |= {f"industrial_large_{strategy}" for strategy in INDUSTRIAL_STRATEGIES}
+    expected.add("industrial_large_safe_loading_safety_first")
+
+    assert expected == set(QUALITY_BASELINES)
+    # 每条基线只能引用有容差定义的指标，否则会被 _check_quality_gate 静默跳过。
+    for metrics in QUALITY_BASELINES.values():
+        assert set(metrics) <= set(QUALITY_TOLERANCES)

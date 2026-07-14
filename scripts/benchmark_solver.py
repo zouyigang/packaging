@@ -41,6 +41,127 @@ INDUSTRIAL_STRATEGIES = (
     "delivery_sequence",
 )
 
+# 质量退化门禁。原先的门禁只挡「装不完 / 有工业错误码 / 容器超限 / 托盘悬空 / 布局不确定」，
+# 只要还装得完，指标全面变差也照样通过——多用一个容器这类回归全靠人工比对才发现。
+# 这里给每个策略的关键指标钉上基线与允许退化幅度：改动确实带来更优解时更新基线，
+# 但必须是有意识地改，而不是悄悄劣化。
+#
+# 耗时不入硬门禁：它随机器波动，由 docs/performance-optimization.md 单独跟踪。
+#
+# 每项：(方向, 相对容差, 绝对容差)。方向 "min" = 越小越好（实测值不得超过基线×(1+rel)+abs），
+# "max" = 越大越好（实测值不得低于基线×(1-rel)-abs）。
+QUALITY_TOLERANCES: dict[str, tuple[str, float, float]] = {
+    "container_count": ("min", 0.0, 0.0),          # 容器数是钱，一个都不许多
+    "total_cost": ("min", 0.02, 0.0),
+    "volume_utilization": ("max", 0.02, 0.0),
+    "stability_score": ("max", 0.03, 0.0),
+    "loading_score": ("max", 0.03, 0.0),
+    "risky_stack_cluster_count": ("min", 0.10, 1.0),
+    "max_stack_cluster_slenderness": ("min", 0.05, 0.0),
+    "required_restraint_kn": ("min", 0.10, 0.0),   # 纵向 + 横向，见 _gate_metrics
+}
+
+QUALITY_BASELINES: dict[str, dict[str, float]] = {
+    # 48 件快速门禁
+    "industrial_cost_efficiency": {
+        "container_count": 1, "total_cost": 750, "volume_utilization": 0.2557,
+        "stability_score": 0.5495, "loading_score": 0.4559,
+        "risky_stack_cluster_count": 1, "max_stack_cluster_slenderness": 1.375,
+        "required_restraint_kn": 0.4354,
+    },
+    "industrial_space_utilization": {
+        "container_count": 1, "total_cost": 750, "volume_utilization": 0.2557,
+        "stability_score": 0.5495, "loading_score": 0.4559,
+        "risky_stack_cluster_count": 1, "max_stack_cluster_slenderness": 1.375,
+        "required_restraint_kn": 0.4354,
+    },
+    "industrial_safe_loading": {
+        "container_count": 1, "total_cost": 750, "volume_utilization": 0.2557,
+        "stability_score": 0.5558, "loading_score": 0.4611,
+        "risky_stack_cluster_count": 2, "max_stack_cluster_slenderness": 2.5,
+        "required_restraint_kn": 0.4781,
+    },
+    "industrial_delivery_sequence": {
+        "container_count": 1, "total_cost": 750, "volume_utilization": 0.2557,
+        "stability_score": 0.3728, "loading_score": 0.7042,
+        "risky_stack_cluster_count": 10, "max_stack_cluster_slenderness": 7.5,
+        "required_restraint_kn": 23.94,
+    },
+    # 1140 件工业验收
+    "industrial_large_cost_efficiency": {
+        "container_count": 2, "total_cost": 4000, "volume_utilization": 0.5197,
+        "stability_score": 0.4321, "loading_score": 0.4891,
+        "risky_stack_cluster_count": 26, "max_stack_cluster_slenderness": 10.5,
+        "required_restraint_kn": 14.46,
+    },
+    "industrial_large_space_utilization": {
+        "container_count": 2, "total_cost": 4000, "volume_utilization": 0.5197,
+        "stability_score": 0.4321, "loading_score": 0.4891,
+        "risky_stack_cluster_count": 26, "max_stack_cluster_slenderness": 10.5,
+        "required_restraint_kn": 14.46,
+    },
+    "industrial_large_safe_loading": {
+        "container_count": 2, "total_cost": 4080, "volume_utilization": 0.5197,
+        "stability_score": 0.4260, "loading_score": 0.4543,
+        "risky_stack_cluster_count": 27, "max_stack_cluster_slenderness": 11.0,
+        "required_restraint_kn": 11.67,
+    },
+    "industrial_large_delivery_sequence": {
+        "container_count": 2, "total_cost": 4000, "volume_utilization": 0.5197,
+        "stability_score": 0.3726, "loading_score": 0.5557,
+        "risky_stack_cluster_count": 40, "max_stack_cluster_slenderness": 11.5,
+        "required_restraint_kn": 20.56,
+    },
+    # safe_loading 的安全优先路径：明确用容器换低固定力，故基线容器数就是 3
+    "industrial_large_safe_loading_safety_first": {
+        "container_count": 3, "total_cost": 6080, "volume_utilization": 0.3464,
+        "stability_score": 0.4395, "loading_score": 0.4773,
+        "risky_stack_cluster_count": 17, "max_stack_cluster_slenderness": 8.0,
+        "required_restraint_kn": 5.53,
+    },
+}
+
+
+def _gate_metrics(quality: dict) -> dict[str, float]:
+    """从质量摘要里取出参与退化门禁的指标。"""
+    metrics = {
+        key: float(quality[key])
+        for key in QUALITY_TOLERANCES
+        if key in quality
+    }
+    metrics["required_restraint_kn"] = (
+        float(quality.get("required_stack_longitudinal_restraint_kn", 0.0))
+        + float(quality.get("required_stack_transverse_restraint_kn", 0.0))
+    )
+    return metrics
+
+
+def _check_quality_gate(case: str, quality: dict) -> list[str]:
+    """返回越界项的说明；全部达标返回空列表。"""
+    baseline = QUALITY_BASELINES.get(case)
+    if baseline is None:
+        return []
+    actual = _gate_metrics(quality)
+    breaches: list[str] = []
+    for metric, expected in baseline.items():
+        if metric not in actual:
+            continue
+        direction, rel, abs_tol = QUALITY_TOLERANCES[metric]
+        value = actual[metric]
+        if direction == "min":
+            allowed = expected * (1.0 + rel) + abs_tol
+            if value > allowed + 1e-9:
+                breaches.append(
+                    f"{metric}: {value:.4g} 超过允许上限 {allowed:.4g}（基线 {expected:.4g}，越小越好）"
+                )
+        else:
+            allowed = expected * (1.0 - rel) - abs_tol
+            if value < allowed - 1e-9:
+                breaches.append(
+                    f"{metric}: {value:.4g} 低于允许下限 {allowed:.4g}（基线 {expected:.4g}，越大越好）"
+                )
+    return breaches
+
 
 def _default_request() -> SolveRequest:
     return SolveRequest(
@@ -407,11 +528,16 @@ def _run_strategy_case(strategy: str, iterations: int, warmups: int) -> dict:
     performance = [solution.performance.model_dump() for solution in solutions if solution.performance]
     if len(performance) != len(solutions):
         raise RuntimeError(f"industrial_{strategy} did not return performance metrics")
+    case = f"industrial_{strategy}"
+    quality = _quality_summary(request, solutions[-1])
+    breaches = _check_quality_gate(case, quality)
+    if breaches:
+        raise RuntimeError(f"{case} 质量退化：\n  - " + "\n  - ".join(breaches))
     return {
-        "case": f"industrial_{strategy}",
+        "case": case,
         "strategy": strategy,
         "deterministic": len(solutions) > 1,
-        **_quality_summary(request, solutions[-1]),
+        **quality,
         **_summarize(performance),
     }
 
@@ -447,6 +573,9 @@ def _run_large_strategy_case(
         raise RuntimeError(
             f"industrial_large_{label} exceeded container gate: {quality['container_count']} > 3"
         )
+    breaches = _check_quality_gate(f"industrial_large_{label}", quality)
+    if breaches:
+        raise RuntimeError(f"industrial_large_{label} 质量退化：\n  - " + "\n  - ".join(breaches))
     return {
         "case": f"industrial_large_{label}",
         "strategy": strategy,
