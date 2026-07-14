@@ -7,6 +7,7 @@ from ..models.schemas import (
     ConstraintViolation,
     Container,
     CostSummary,
+    Diagnostics,
     Placement,
     LoadingAccess,
     Solution,
@@ -31,7 +32,7 @@ def prepare_request(request: SolveRequest) -> tuple[SolveRequest, list[Constrain
     violations: list[ConstraintViolation] = []
     canonical, _profile = resolve_objective(prepared.objective)
     if prepared.objective != canonical:
-        violations.append(_warning(
+        violations.append(_info(
             "OBJECTIVE_DEPRECATED",
             f"策略名 {prepared.objective} 为兼容别名；请迁移到 {canonical}。",
         ))
@@ -57,7 +58,7 @@ def prepare_request(request: SolveRequest) -> tuple[SolveRequest, list[Constrain
         if prepared.validation_mode == "industrial" and container.equipment_profile == "iso_container":
             if container.cog_limits is None:
                 container.cog_limits = CogLimits()
-                violations.append(_warning(
+                violations.append(_info(
                     "ISO_COG_TEMPLATE_APPLIED",
                     f"容器 {container.id} 使用 ISO 模板默认重心范围；投产前应由承运方确认。",
                     container.id,
@@ -80,7 +81,7 @@ def prepare_request(request: SolveRequest) -> tuple[SolveRequest, list[Constrain
         if container.default_friction_coefficient is None:
             violations.append(_error("FRICTION_REQUIRED", f"工业模式下设备 {container.id} 必须配置默认摩擦系数。", container.id))
         if container.restraint_mode == "unverified":
-            violations.append(_warning(
+            violations.append(_info(
                 "STACK_RESTRAINT_UNVERIFIED",
                 f"设备 {container.id} 未确认堆垛簇纵横向固定能力；风险簇仅作警告。",
                 container.id,
@@ -100,7 +101,7 @@ def prepare_request(request: SolveRequest) -> tuple[SolveRequest, list[Constrain
     if canonical == "cost_efficiency" and prepared.validation_mode == "standard":
         missing = [container.id for container in prepared.containers if container.use_cost is None]
         if missing:
-            violations.append(_warning(
+            violations.append(_info(
                 "COST_DATA_MISSING",
                 "部分容器未配置成本，已使用容器数量与容量代理进行比较。",
             ))
@@ -208,13 +209,15 @@ def finalize_solution(
     max_cluster_slenderness = 0.0
     required_stack_longitudinal = 0.0
     required_stack_transverse = 0.0
-    for loaded in solution.containers:
+    for container_index, loaded in enumerate(solution.containers):
         container = container_map.get(loaded.id)
         if container is None:
             continue
         infos = _placement_infos(loaded.placements, item_map)
         if not infos and not loaded.pallet_instances:
             continue
+        # 本轮新产生的告警都属于这一只容器实例，末尾统一打下标。
+        violations_before = len(violations)
         load_context = IndustrialLoadContext(container)
         cluster_loads: list[tuple[tuple[float, float, float, float, float, float], float]] = []
         for pallet_instance in loaded.pallet_instances:
@@ -323,6 +326,8 @@ def finalize_solution(
                 ))
         if canonical == "delivery_sequence" and request.validation_mode == "industrial":
             violations.extend(_post_drop_violations(container, infos, loaded.pallet_instances))
+        for violation in violations[violations_before:]:
+            violation.container_index = container_index
 
     metrics["max_floor_load_kg_m2"] = max_floor_pressure
     metrics["load_distribution_margin"] = min_curve_margin
@@ -335,14 +340,51 @@ def finalize_solution(
     metrics["required_stack_transverse_restraint_kn"] = required_stack_transverse
 
     solution.violations = _dedupe_violations(violations)
-    has_error = any(violation.severity == "error" for violation in solution.violations)
-    if has_error:
-        solution.status = "infeasible"
-    elif solution.unpacked:
-        solution.status = "partial"
-    else:
-        solution.status = "feasible"
+    solution.diagnostics = _summarize_diagnostics(solution)
+    solution.status = _resolve_status(solution)
     return metrics
+
+
+def _resolve_status(solution: Solution) -> str:
+    """三层语义（与 ConstraintViolation 的 severity 对应）：
+
+    - `infeasible`：存在 error —— 方案按现有输入无法执行，必须先解决。
+    - `partial`：没有 error，但有余货 —— 装上的部分可以执行，只是没装完。
+    - `feasible`：没有 error 且全部装完 —— 可以执行；仍可能带 warning（需绑扎/支挡）
+      或 info（配置口径提示），由 diagnostics 与分层告警呈现，不改变可执行结论。
+    """
+    if any(violation.severity == "error" for violation in solution.violations):
+        return "infeasible"
+    if solution.unpacked:
+        return "partial"
+    return "feasible"
+
+
+def _summarize_diagnostics(solution: Solution) -> Diagnostics:
+    counts = Counter(violation.severity for violation in solution.violations)
+    errors = counts.get("error", 0)
+    warnings = counts.get("warning", 0)
+    infos = counts.get("info", 0)
+    unpacked = len(solution.unpacked)
+
+    if errors:
+        reason = f"{errors} 项硬约束未满足，方案不可执行。"
+        if unpacked:
+            reason += f"另有 {unpacked} 件余货未装载。"
+    elif unpacked:
+        reason = f"已装载部分可执行，但有 {unpacked} 件余货未装下。"
+    elif warnings:
+        reason = f"方案可执行，但有 {warnings} 项风险需要绑扎或支挡等措施。"
+    else:
+        reason = "方案可执行，无风险项。"
+
+    return Diagnostics(
+        error_count=errors,
+        warning_count=warnings,
+        info_count=infos,
+        unpacked_count=unpacked,
+        status_reason=reason,
+    )
 
 
 def _placement_infos(placements: list[Placement], item_map: dict):
@@ -660,11 +702,18 @@ def _overlap_2d(a1: float, a2: float, b1: float, b2: float) -> float:
     return max(0.0, min(a2, b2) - max(a1, b1))
 
 
+def _info(code: str, message: str, container_id: str = "", item_id: str = "") -> ConstraintViolation:
+    """配置口径 / 兼容性提示：不要求改动布局。"""
+    return ConstraintViolation(code=code, severity="info", message=message, container_id=container_id, item_id=item_id)
+
+
 def _warning(code: str, message: str, container_id: str = "", item_id: str = "") -> ConstraintViolation:
+    """布局存在物理风险：要绑扎、支挡才能上路。"""
     return ConstraintViolation(code=code, severity="warning", message=message, container_id=container_id, item_id=item_id)
 
 
 def _error(code: str, message: str, container_id: str = "", item_id: str = "") -> ConstraintViolation:
+    """方案不可执行或必填输入缺失：必须解决。"""
     return ConstraintViolation(code=code, severity="error", message=message, container_id=container_id, item_id=item_id)
 
 
@@ -672,7 +721,13 @@ def _dedupe_violations(violations: list[ConstraintViolation]) -> list[Constraint
     seen: set[tuple] = set()
     result: list[ConstraintViolation] = []
     for violation in violations:
-        key = (violation.code, violation.severity, violation.message, violation.container_id, violation.item_id, violation.stop_seq)
+        # container_index 必须入键：多只容器共用同一个类型 id，两只箱子给出字面相同的
+        # 告警时，不带下标去重会把其中一只悄悄吞掉。
+        key = (
+            violation.code, violation.severity, violation.message,
+            violation.container_id, violation.container_index,
+            violation.item_id, violation.stop_seq,
+        )
         if key not in seen:
             seen.add(key)
             result.append(violation)

@@ -217,12 +217,32 @@ class PerformanceMetrics(BaseModel):
 
 
 class ConstraintViolation(BaseModel):
+    """一条约束诊断。三层语义：
+
+    - `error`：方案不可执行，或工业模式下必填输入缺失。必须解决，`status` 随之 `infeasible`。
+    - `warning`：布局本身存在物理风险，需要采取措施（绑扎、支挡）才能上路。
+    - `info`：配置口径与兼容性提示，不要求改动布局（如用了 ISO 模板默认值、设备未申报固定能力）。
+    """
+
     code: str
-    severity: Literal["warning", "error"] = "warning"
+    severity: Literal["info", "warning", "error"] = "warning"
     message: str
     container_id: str = ""
+    # 容器实例下标（solution.containers 的位置）。多只容器共用同一个类型 id 时，
+    # 只靠 container_id 无法定位到具体是哪一只。
+    container_index: Optional[int] = None
     item_id: str = ""
     stop_seq: Optional[int] = None
+
+
+class Diagnostics(BaseModel):
+    """结果状态的分层摘要，供界面一眼看清「能不能上路、要不要处理」。"""
+
+    error_count: int = 0
+    warning_count: int = 0
+    info_count: int = 0
+    unpacked_count: int = 0
+    status_reason: str = ""
 
 
 class CostSummary(BaseModel):
@@ -241,6 +261,7 @@ class Solution(BaseModel):
     performance: Optional[PerformanceMetrics] = None
     alternatives: list["SolutionAlternative"] = Field(default_factory=list)
     violations: list[ConstraintViolation] = Field(default_factory=list)
+    diagnostics: Optional[Diagnostics] = None
     cost_summary: Optional[CostSummary] = None
 
 

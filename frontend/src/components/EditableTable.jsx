@@ -96,7 +96,7 @@ export default function EditableTable({ kind, title, fields }) {
         okText="确定"
         cancelText="取消"
         width={900}
-        destroyOnClose
+        destroyOnHidden
       >
         {addingRow && (
           <div className="modal-field-grid">
@@ -118,7 +118,7 @@ export default function EditableTable({ kind, title, fields }) {
         onCancel={() => setEditingId(null)}
         footer={null}
         width={900}
-        destroyOnClose
+        destroyOnHidden
       >
         {editingRow && (
           <div className="modal-field-grid">

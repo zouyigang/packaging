@@ -185,9 +185,7 @@ export default function ResultPanel() {
         )}
         <div style={{ flex: 1 }} />
         {slowHint && <Tag color="warning">{slowHint}</Tag>}
-        <Tag color={solution.status === 'feasible' ? 'success' : solution.status === 'partial' ? 'warning' : 'error'}>
-          {solution.status === 'feasible' ? '可执行' : solution.status === 'partial' ? '部分装载' : '不可行'}
-        </Tag>
+        <StatusTag solution={solution} />
         {solution.unpacked.length > 0 && <Tag color="warning">余货 {solution.unpacked.length} 件</Tag>}
       </div>
 
@@ -237,15 +235,7 @@ export default function ResultPanel() {
         </div>
       )}
 
-      {solution.violations?.length > 0 && (
-        <div className="evaluation-panel evaluation-warnings">
-          {solution.violations.map((violation, index) => (
-            <span key={`${violation.code}-${index}`}>
-              [{violation.severity === 'error' ? '错误' : '提示'}] {violation.message}
-            </span>
-          ))}
-        </div>
-      )}
+      <DiagnosticsPanel solution={solution} />
 
       {solution.performance && <PerformancePanel performance={solution.performance} />}
 
@@ -405,4 +395,79 @@ function gradeColor(grade) {
   if (grade === 'B') return 'processing'
   if (grade === 'C') return 'warning'
   return 'error'
+}
+
+// 三层诊断：错误（不可执行，必须解决）/ 风险（可执行，但要绑扎支挡）/ 提示（配置口径说明）。
+// 后端 severity 与 Solution.status 是同一套语义，见 schemas.ConstraintViolation。
+const SEVERITY_LAYERS = [
+  { severity: 'error', label: '错误', hint: '方案不可执行，必须先解决', color: 'error' },
+  { severity: 'warning', label: '风险', hint: '可执行，但需要绑扎或支挡等措施', color: 'warning' },
+  { severity: 'info', label: '提示', hint: '配置口径说明，无需改动布局', color: 'default' },
+]
+
+function violationLocation(violation) {
+  const parts = []
+  if (violation.container_index !== null && violation.container_index !== undefined) {
+    // 多只容器共用同一个类型 id，只有实例下标能定位到具体是哪一只。
+    parts.push(`容器 #${violation.container_index + 1}${violation.container_id ? ` ${violation.container_id}` : ''}`)
+  }
+  if (violation.item_id) parts.push(`货品 ${violation.item_id}`)
+  if (violation.stop_seq) parts.push(`站点 ${violation.stop_seq}`)
+  return parts.join(' · ')
+}
+
+function DiagnosticsPanel({ solution }) {
+  const diagnostics = solution.diagnostics
+  const violations = solution.violations || []
+  if (!diagnostics && violations.length === 0) return null
+
+  return (
+    <div className="evaluation-panel diagnostics-panel">
+      {diagnostics?.status_reason && (
+        <div className="diagnostics-summary">
+          <span>{diagnostics.status_reason}</span>
+        </div>
+      )}
+      {SEVERITY_LAYERS.map((layer) => {
+        const layerViolations = violations.filter((v) => v.severity === layer.severity)
+        if (layerViolations.length === 0) return null
+        return (
+          <div className="diagnostics-layer" key={layer.severity}>
+            <div className="diagnostics-layer-head">
+              <Tag color={layer.color}>{layer.label} {layerViolations.length}</Tag>
+              <span className="diagnostics-layer-hint">{layer.hint}</span>
+            </div>
+            {layerViolations.map((violation, index) => {
+              const location = violationLocation(violation)
+              return (
+                <div className="diagnostics-item" key={`${violation.code}-${index}`}>
+                  <code>{violation.code}</code>
+                  {location && <span className="diagnostics-location">{location}</span>}
+                  <span className="diagnostics-message">{violation.message}</span>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// 「可执行」和「可执行但有风险」是两回事：前者可以直接上路，后者必须先绑扎支挡。
+// 后端 status 只分 feasible/partial/infeasible，风险数量来自 diagnostics。
+function StatusTag({ solution }) {
+  const warnings = solution.diagnostics?.warning_count || 0
+  const reason = solution.diagnostics?.status_reason || ''
+
+  if (solution.status === 'infeasible') {
+    return <Tag color="error" title={reason}>不可执行</Tag>
+  }
+  if (solution.status === 'partial') {
+    return <Tag color="warning" title={reason}>部分装载</Tag>
+  }
+  if (warnings > 0) {
+    return <Tag color="gold" title={reason}>可执行 · {warnings} 项风险</Tag>
+  }
+  return <Tag color="success" title={reason}>可执行</Tag>
 }
