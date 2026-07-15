@@ -114,10 +114,12 @@ QUALITY_BASELINES: dict[str, dict[str, float]] = {
         "risky_stack_cluster_count": 40, "max_stack_cluster_slenderness": 11.5,
         "required_restraint_kn": 20.56,
     },
-    # safe_loading 的安全优先路径：明确用容器换低固定力，故基线容器数就是 3
+    # safe_loading 的安全优先路径：明确用容量换低固定力。开箱择箱现算固定力后，改用
+    # 40GP+20GP 取代原来的 3 只 20GP——固定力/危险簇/细长比不变（5.53kN、17、8.0），
+    # 但容器 3→2、成本 6080→5480（省一只箱）。见 run_container_loop 的 _score_safety_trials。
     "industrial_large_safe_loading_safety_first": {
-        "container_count": 3, "total_cost": 6080, "volume_utilization": 0.3464,
-        "stability_score": 0.4395, "loading_score": 0.4773,
+        "container_count": 2, "total_cost": 5480, "volume_utilization": 0.342,
+        "stability_score": 0.439, "loading_score": 0.424,
         "risky_stack_cluster_count": 17, "max_stack_cluster_slenderness": 8.0,
         "required_restraint_kn": 5.53,
     },

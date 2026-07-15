@@ -1766,27 +1766,134 @@ def _packed_volume(loaded: LoadedContainer, container: Container) -> float:
     )
 
 
+# safe_loading + 工业模式 + 安全优先：开箱时的「所需固定力」权重（每 kN 折算成多少
+# 成本当量并入择箱估算）。让择箱在「装完成本」之外也偏向低固定力的箱型选择——
+# 大箱底面积大、扁平件铺得开、堆垛簇更矮，故常以换更大箱型的方式压低固定力。
+# 由实测标定：太小则退化回纯成本择箱、太大则无脑开最大箱。见 docs/industrial-strategies.md。
+_SAFETY_RESTRAINT_COST_PER_KN = 400.0
+
+
+def _loaded_cluster_loads(
+    loaded: LoadedContainer,
+    item_map: dict[str, Item],
+) -> list[tuple[tuple[float, float, float, float, float, float], float]]:
+    """从已装容器重建堆垛簇载荷 (box, mass) 列表，口径与 finalize_solution 一致
+    （含托盘实例 tare + 各件定向包围盒）。供开箱择箱时现算所需固定力。"""
+    loads: list[tuple[tuple[float, float, float, float, float, float], float]] = []
+    for pallet_instance in loaded.pallet_instances:
+        loads.append((
+            (
+                pallet_instance.x,
+                pallet_instance.y,
+                pallet_instance.z,
+                pallet_instance.length,
+                pallet_instance.width,
+                pallet_instance.deck_height,
+            ),
+            pallet_instance.tare_weight,
+        ))
+    for placement in loaded.placements:
+        item = item_map.get(placement.item_id)
+        if item is None:
+            continue
+        dx, dy, dz = oriented_dims(item.length, item.width, item.height, placement.orientation)
+        mass = item.weight if item.weight > 0 else dx * dy * dz
+        loads.append(((placement.x, placement.y, placement.z, dx, dy, dz), mass))
+    return loads
+
+
+def _trial_required_restraint_kn(
+    container: Container,
+    loaded: LoadedContainer,
+    item_map: dict[str, Item],
+) -> float:
+    """一次试装的堆垛簇所需固定力（纵向 + 横向 kN）。容器无运输加速度时为 0。"""
+    if container.acceleration_profile is None:
+        return 0.0
+    cluster = analyze_stack_clusters(container, _loaded_cluster_loads(loaded, item_map))
+    return (
+        cluster.required_longitudinal_restraint_kn
+        + cluster.required_transverse_restraint_kn
+    )
+
+
+def _score_safety_trials(
+    safety_trials: list[dict],
+    available: list[Container],
+    item_map: dict[str, Item],
+) -> list[tuple]:
+    """安全优先择箱：在「装完总成本」之外把所需固定力折成成本当量一并最小化。
+
+    复用成本择箱的「装完成本」下界口径（余货非空至少还要再开最便宜一只箱），再加
+    `_SAFETY_RESTRAINT_COST_PER_KN × 本箱所需固定力`。于是当大箱能把货铺开、显著压低
+    固定力时，即便单箱更贵也会被选中——这就是「容量换安全」，且代价按固定力实测收敛，
+    不是无条件多花钱。"""
+    if not safety_trials:
+        return []
+
+    best_cost_per_volume = min(
+        (
+            _container_cost(trial["container"]) / packed
+            for trial in safety_trials
+            if (packed := _packed_volume(trial["loaded"], trial["container"])) > EPS
+        ),
+        default=0.0,
+    )
+    cheapest_cost = min((_container_cost(c) for c in available), default=0.0)
+
+    scored: list[tuple] = []
+    for trial in safety_trials:
+        cost = _container_cost(trial["container"])
+        leftover = trial["remaining"]
+        if leftover:
+            leftover_volume = sum(pl.volume for pl in leftover)
+            estimate = cost + max(cheapest_cost, leftover_volume * best_cost_per_volume)
+        else:
+            estimate = cost
+        restraint_kn = _trial_required_restraint_kn(trial["container"], trial["loaded"], item_map)
+        estimate += _SAFETY_RESTRAINT_COST_PER_KN * restraint_kn
+        key = (
+            -estimate,
+            trial["priority_value"],
+            trial["placed_count"],
+            trial["loaded"].volume_utilization,
+        )
+        scored.append((key, trial["index"], trial["loaded"], trial["remaining"]))
+    return scored
+
+
 def run_container_loop(
     placeables: list[_Placeable],
     containers: list[Container],
     objective: Objective,
     timer: PerformanceTimer | None = None,
     observe_industrial: bool = False,
+    item_map: dict[str, Item] | None = None,
 ) -> Solution:
     """按给定顺序把 placeables 逐只开箱装载（GA 解码器复用此函数）。
 
     placeables 的先后即放置优先级；调用方负责排序。
+    item_map 仅供 safe_loading 的「安全优先」开箱择箱现算固定力用；为 None（如 GA 路径）
+    时该策略退化回首箱顺序，与旧行为一致。
     """
     remaining = list(placeables)
     solution = Solution()
     industrial_rejection_codes: set[str] = set()
     available = list(containers)
+    # 安全优先择箱：工业模式 + safe_loading + safety_priority 时，像成本/空间策略一样
+    # 逐类型试装，但按「装完成本 + 固定力当量」择箱，以更大箱型换更低固定力（容量换安全）。
+    safety_trial_mode = (
+        observe_industrial
+        and item_map is not None
+        and objective.name == "safe_loading"
+        and getattr(objective, "safety_priority", False)
+    )
     while available and remaining:
-        if objective.name in {"cost_efficiency", "space_utilization"}:
+        if objective.name in {"cost_efficiency", "space_utilization"} or safety_trial_mode:
             trials: list[tuple[tuple[float, ...], int, LoadedContainer, list[_Placeable]]] = []
-            # 成本策略先把各类型的试装结果收齐，再统一打分——单位体积成本必须用
+            # 成本/安全策略先把各类型的试装结果收齐，再统一打分——单位体积成本必须用
             # 实测装载体积算，用容器标称体积会当成 100% 填充，严重低估余货的代价。
-            cost_trials: list[dict] = []
+            scored_trials: list[dict] = []
             seen_types: set[tuple] = set()
             for index, candidate_container in enumerate(available):
                 signature = (
@@ -1813,8 +1920,8 @@ def run_container_loop(
                     for pl in remaining
                     if id(pl) not in leftover_ids
                 )
-                if objective.name == "cost_efficiency":
-                    cost_trials.append({
+                if objective.name == "cost_efficiency" or safety_trial_mode:
+                    scored_trials.append({
                         "container": candidate_container,
                         "index": index,
                         "loaded": trial_loaded,
@@ -1826,8 +1933,10 @@ def run_container_loop(
                     key = (trial_loaded.volume_utilization, priority_value, placed_count)
                     trials.append((key, index, trial_loaded, trial_remaining))
 
-            if objective.name == "cost_efficiency":
-                trials = _score_cost_trials(cost_trials, available)
+            if safety_trial_mode:
+                trials = _score_safety_trials(scored_trials, available, item_map)
+            elif objective.name == "cost_efficiency":
+                trials = _score_cost_trials(scored_trials, available)
             if not trials:
                 break
             _key, selected_index, loaded, next_remaining = max(trials, key=lambda trial: trial[0])
@@ -1889,6 +1998,7 @@ def solve(request: SolveRequest) -> Solution:
             objective,
             timer,
             observe_industrial=request.validation_mode == "industrial",
+            item_map={item.id: item for item in request.items},
         )
     with timer.stage("evaluator"):
         industrial_metrics = finalize_solution(request, solution, initial_violations)

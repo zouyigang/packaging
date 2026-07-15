@@ -10,6 +10,7 @@ from math import ceil
 
 from ..models.schemas import Container, ContainerEvaluation, Evaluation, Item, Placement, Solution, SolveRequest
 from .geometry import oriented_dims
+from .industrial_context import G
 from .objectives import resolve_objective
 
 
@@ -111,6 +112,21 @@ _STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
 }
 
 
+# 工业模式下的 safe_loading 变体：从 safety_worst 分出 0.15 给 restraint_score
+# （堆垛簇所需固定力的归一化分）。标准模式沿用上表——固定力只在配了运输加速度、
+# 且用户开工业校验时才有物理意义，否则该分恒为 1.0 会凭空抬高标准模式的安全评分。
+# 这一维是唯一能把「纵向固定力爆表但堆得矮」的解从高分拉下来的信号（见
+# docs/ga-industrial-restraint-experiment.md 的评分器失明缺口）。
+_SAFE_LOADING_INDUSTRIAL_WEIGHTS: dict[str, float] = {
+    "safety_worst_score": 0.35,
+    "restraint_score": 0.15,
+    "stability_score": 0.20,
+    "balance_score": 0.20,
+    "loaded_completion": 0.08,
+    "used_volume_utilization": 0.02,
+}
+
+
 def evaluate_solution(request: SolveRequest, solution: Solution) -> Evaluation:
     item_map = {item.id: item for item in request.items}
     container_map = {container.id: container for container in request.containers}
@@ -128,6 +144,8 @@ def evaluate_solution(request: SolveRequest, solution: Solution) -> Evaluation:
             "balance_score": weights.balance if weights else 0.15,
             "loading_score": weights.loading_position if weights else 0.10,
         }
+    elif resolved == "safe_loading" and request.validation_mode == "industrial":
+        profile = _SAFE_LOADING_INDUSTRIAL_WEIGHTS
     else:
         profile = _STRATEGY_WEIGHTS.get(objective, _STRATEGY_WEIGHTS["transport_cost"])
 
@@ -202,6 +220,7 @@ def _base_metrics(request: SolveRequest, solution: Solution, infos: list[_Placem
         "stability_score": stability_score,
         "balance_score": balance_score,
         "safety_worst_score": min(stability_score, balance_score),
+        "restraint_score": _solution_restraint_score(request, solution),
         "loading_score": _loading_score(infos),
         "pallet_score": _pallet_score(infos),
         "unpacked_penalty": unpacked_penalty,
@@ -220,6 +239,13 @@ def _container_evaluations(
         container_infos = infos_by_container.get(container_index, [])
         metrics = _container_metrics(container_infos)
         metrics.update(loaded.industrial_metrics)
+        container = container_infos[0].container if container_infos else None
+        metrics["restraint_score"] = _restraint_score(
+            metrics.get("required_stack_longitudinal_restraint_kn", 0.0)
+            + metrics.get("required_stack_transverse_restraint_kn", 0.0),
+            metrics.get("total_mass", 0.0) * G / 1000.0,
+            container.acceleration_profile if container is not None else None,
+        )
         score = _weighted_score(metrics, profile)
         evaluations.append(ContainerEvaluation(
             index=container_index,
@@ -244,6 +270,7 @@ def _container_metrics(infos: list[_PlacementInfo]) -> dict[str, float]:
             "stability_score": 1.0,
             "balance_score": 1.0,
             "safety_worst_score": 1.0,
+            "restraint_score": 1.0,
             "loading_score": 1.0,
             "pallet_score": 1.0,
             "unpacked_penalty": 0.0,
@@ -264,6 +291,7 @@ def _container_metrics(infos: list[_PlacementInfo]) -> dict[str, float]:
         "stability_score": stability_score,
         "balance_score": balance_score,
         "safety_worst_score": min(stability_score, balance_score),
+        "restraint_score": 1.0,
         "loading_score": _loading_score(infos),
         "pallet_score": _pallet_score(infos),
         "unpacked_penalty": 0.0,
@@ -327,6 +355,49 @@ def _cost_efficiency_score(
             lower_bounds.append(required * cost)
     theoretical = min(lower_bounds) if lower_bounds else min(actual, 1.0)
     return _clamp(theoretical / actual)
+
+
+def _restraint_score(restraint_kn: float, weight_kn: float, profile) -> float:
+    """把堆垛簇所需固定力归一化成 [0,1] 分（越大越安全）。
+
+    分母是「理论最大所需固定力」= 货重(kN) ×(纵向 g + 横向 g)：当簇重心正压在
+    支撑边界上时所需固定力趋近该上限。restraint/上限 就是实际用掉多少比例的
+    「必须绑扎」额度。没配运输加速度 profile（非工业口径）时返回 1.0，不参与评分。
+    """
+    if profile is None or weight_kn <= 0:
+        return 1.0
+    max_fraction = profile.longitudinal_g + profile.transverse_g
+    if max_fraction <= 0:
+        return 1.0
+    return _clamp(1.0 - restraint_kn / (weight_kn * max_fraction))
+
+
+def _solution_restraint_score(request: SolveRequest, solution: Solution) -> float:
+    """跨容器聚合固定力分：合计所需固定力 / 合计理论上限，越低越安全。
+
+    读 finalize_solution 已挂在每只容器上的 industrial_metrics，故须在其之后调用
+    （evaluate_solution 的既有调用点正是如此）。"""
+    container_map = {container.id: container for container in request.containers}
+    total_restraint_kn = 0.0
+    total_denominator_kn = 0.0
+    for loaded in solution.containers:
+        container = container_map.get(loaded.id)
+        if container is None or container.acceleration_profile is None:
+            continue
+        metrics = loaded.industrial_metrics
+        weight_kn = metrics.get("total_mass", 0.0) * G / 1000.0
+        max_fraction = (
+            container.acceleration_profile.longitudinal_g
+            + container.acceleration_profile.transverse_g
+        )
+        total_restraint_kn += (
+            metrics.get("required_stack_longitudinal_restraint_kn", 0.0)
+            + metrics.get("required_stack_transverse_restraint_kn", 0.0)
+        )
+        total_denominator_kn += weight_kn * max_fraction
+    if total_denominator_kn <= 0:
+        return 1.0
+    return _clamp(1.0 - total_restraint_kn / total_denominator_kn)
 
 
 def _stability_score(infos: list[_PlacementInfo]) -> float:
@@ -444,6 +515,12 @@ def _warnings(metrics: dict[str, float], objective: str) -> list[str]:
         warnings.append("容器重心存在明显偏移。")
     if metrics["stability_score"] < 0.70:
         warnings.append("装载稳定性偏低，可能存在高位或细高堆放。")
+    restraint_kn = (
+        metrics.get("required_stack_longitudinal_restraint_kn", 0.0)
+        + metrics.get("required_stack_transverse_restraint_kn", 0.0)
+    )
+    if restraint_kn > 0 and metrics.get("restraint_score", 1.0) < 0.60:
+        warnings.append("堆垛簇所需固定力偏高，安全评分已计入该项。")
     if objective in {"loading_efficiency", "multi_customer_delivery"} and metrics["loading_score"] < 0.75:
         warnings.append("卸货顺序与装货入口位置匹配度偏低。")
     if objective in {"transport_cost", "max_utilization", "min_containers"} and metrics["container_count_score"] < 0.90:

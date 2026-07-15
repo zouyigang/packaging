@@ -5,6 +5,7 @@ responsible for decoding each ordered individual into a concrete solution.
 """
 from __future__ import annotations
 
+import os
 from concurrent.futures import ProcessPoolExecutor
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -15,6 +16,7 @@ import numpy as np
 from ..models.schemas import Container, Item, PerformanceMetrics, Solution, SolutionAlternative, SolveRequest
 from .evaluator import evaluate_solution
 from .industrial import finalize_solution, prepare_request
+from .industrial_context import analyze_stack_clusters
 from .geometry import oriented_dims
 from .objectives import AdvancedScoreWeights, get_objective, resolve_objective
 from .packer import (
@@ -29,6 +31,13 @@ _GA_WORKER_PLACEABLES: list[_Placeable] | None = None
 _GA_WORKER_CONTAINERS: list[Container] | None = None
 _GA_WORKER_OBJECTIVE: object | None = None
 _GA_WORKER_OBSERVE_INDUSTRIAL = False
+
+# 实验开关（默认关）：safe_loading 策略在工业模式 + GA 路径下，把「堆垛簇所需
+# 固定力（纵+横 kN）」作为罚项并入 GA fitness。权重乘子，0 = 关（等于旧基线）。
+# 经 1140 件多种子实验：开启后同容器数下横向固定力/危险簇稳定下降、纵向固定力
+# 多数种子大幅下降但有方差，故落为环境变量 opt-in（如 GA_SAFE_RESTRAINT_WEIGHT=20），
+# 默认不改变任何既有行为。详见 docs/ga-industrial-restraint-experiment.md。
+_SAFE_LOADING_RESTRAINT_WEIGHT = float(os.environ.get("GA_SAFE_RESTRAINT_WEIGHT", "0.0"))
 
 
 @dataclass
@@ -143,6 +152,7 @@ def _make_fitness(
     container_map: dict[str, Container],
     advanced_weights: AdvancedScoreWeights | None = None,
     pallet_map: dict | None = None,
+    industrial: bool = False,
 ):
     """Return a solution fitness function. Higher is better."""
     total_cargo_volume = sum(_cargo_volume(item) * item.quantity for item in item_map.values()) or 1.0
@@ -231,6 +241,45 @@ def _make_fitness(
                 count += 1
         return penalty / count if count else 1.0
 
+    def restraint_penalty(sol: Solution) -> float:
+        """堆垛簇所需固定力（纵向 + 横向 kN）之和，越小越安全。
+
+        复刻 finalize_solution 的簇载荷构建（含托盘实例），逐容器调用纯函数
+        analyze_stack_clusters 现算。容器未配运输加速度时该函数返回 0，
+        故仅在工业模式且配了加速度的容器上非零。
+        """
+        total_kn = 0.0
+        for loaded in sol.containers:
+            container = container_map.get(loaded.id)
+            if container is None or container.acceleration_profile is None:
+                continue
+            cluster_loads: list[tuple[tuple[float, float, float, float, float, float], float]] = []
+            for pallet_instance in getattr(loaded, "pallet_instances", ()) or ():
+                cluster_loads.append((
+                    (
+                        pallet_instance.x,
+                        pallet_instance.y,
+                        pallet_instance.z,
+                        pallet_instance.length,
+                        pallet_instance.width,
+                        pallet_instance.deck_height,
+                    ),
+                    pallet_instance.tare_weight,
+                ))
+            for p in loaded.placements:
+                item = item_map.get(p.item_id)
+                if item is None:
+                    continue
+                dx, dy, dz = oriented_dims(item.length, item.width, item.height, p.orientation)
+                mass = item.weight if item.weight > 0 else dx * dy * dz
+                cluster_loads.append(((p.x, p.y, p.z, dx, dy, dz), mass))
+            cluster = analyze_stack_clusters(container, cluster_loads)
+            total_kn += (
+                cluster.required_longitudinal_restraint_kn
+                + cluster.required_transverse_restraint_kn
+            )
+        return total_kn
+
     def pallet_ratio(sol: Solution) -> float:
         placements = [p for loaded in sol.containers for p in loaded.placements]
         if not placements:
@@ -284,10 +333,17 @@ def _make_fitness(
         def fitness(sol: Solution) -> float:
             return common_score(sol) + utilization(sol) * 1e3 - len(sol.containers)
     elif canonical == "safe_loading":
+        apply_restraint = industrial and _SAFE_LOADING_RESTRAINT_WEIGHT > 0.0
+
         def fitness(sol: Solution) -> float:
             stability_quality = 1.0 - min(stability_penalty(sol), 1.0)
             balance_quality = 1.0 - min(cog_penalty(sol) / max(len(sol.containers), 1), 1.0)
-            return common_score(sol) + min(stability_quality, balance_quality) * 700.0 + 0.5 * (stability_quality + balance_quality) * 300.0
+            score = common_score(sol) + min(stability_quality, balance_quality) * 700.0 + 0.5 * (stability_quality + balance_quality) * 300.0
+            # 实验：把堆垛簇所需固定力并入 fitness，引导 GA 主动降低固定力/危险簇。
+            # 罚项落在细粒度层（远小于 common_score 的 1e6+），不会翻转必装/装载量排序。
+            if apply_restraint:
+                score -= _SAFE_LOADING_RESTRAINT_WEIGHT * restraint_penalty(sol)
+            return score
     elif canonical == "delivery_sequence":
         def fitness(sol: Solution) -> float:
             return common_score(sol) + (1.0 - min(loading_penalty(sol), 1.0)) * 1e3
@@ -426,6 +482,7 @@ def solve_ga(request: SolveRequest, config: GAConfig | None = None) -> Solution:
             container_map,
             getattr(objective, "weights", None),
             pallet_map,
+            industrial=request.validation_mode == "industrial",
         )
 
     m = len(placeables)

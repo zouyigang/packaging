@@ -268,7 +268,7 @@ export default function EditPanel() {
               style={{ width: 72 }}
             />
             {objective === 'safe_loading' && (
-              <Tooltip title="扁平件先落位、少码细高柱，显著降低堆垛所需固定力；代价是密度下降、可能多开容器">
+              <Tooltip title="扁平件先落位、少码细高柱，并按固定力自动择箱（工业校验下必要时换更大箱型把货铺开），显著降低堆垛所需固定力；代价是成本可能上升">
                 <Space size={6}>
                   <Switch size="small" checked={safetyPriority} onChange={setSafetyPriority} />
                   <span>安全优先</span>
