@@ -9,6 +9,17 @@ import { defineConfig, devices } from '@playwright/test'
 // conda 的 packaging 环境），所以用 PACKAGING_PYTHON 显式指定。见 CLAUDE.md 的运行命令。
 const PYTHON = process.env.PACKAGING_PYTHON || 'python'
 
+// 本机把 HTTP_PROXY 指向本地代理软件（如 Bright Data / Clash，端口 24000）。Playwright 用 Node
+// 侧的请求做两件事：webServer 启动前探测 URL 是否「已占用」、启动后轮询 URL 是否「就绪」。这两个
+// 请求都会走代理，而代理对 127.0.0.1:8000/5173 一律回错误响应（403 之类）——于是探测阶段把这个
+// 响应当成「端口已被占用」直接报错，就绪阶段又永远等不到 2xx 而 60s 超时。e2e 全是本地回环，
+// 根本不需要代理，直接在本进程内清掉，子进程（uvicorn / vite）也一并干净。
+for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+  delete process.env[key]
+}
+process.env.NO_PROXY = '*'
+process.env.no_proxy = '*'
+
 export default defineConfig({
   testDir: './e2e',
   // 求解 1140 件要几秒，默认 30s 断言超时不够。
@@ -32,18 +43,25 @@ export default defineConfig({
       },
     },
   ],
+  // reuseExistingServer 一律关掉：开着的话 Playwright 会把后端/前端进程留在后台供下次复用，
+  // 结果是测试跑完 8000 端口还被占着，之后手动起后端会撞 WinError 10013（Windows 对这种
+  // 部分重叠的绑定冲突报的是权限错误，不是「地址已占用」，排查起来很误导）。
+  // 代价是每次 e2e 都重启一次服务，多几秒；换来的是跑完不留残留进程。
   webServer: [
     {
       command: `${PYTHON} -m uvicorn app.main:app --port 8000`,
       cwd: '../backend',
       url: 'http://127.0.0.1:8000/health',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 60_000,
     },
     {
-      command: 'npm run dev',
+      // 必须显式 --host 127.0.0.1：vite 默认绑 `localhost`，而 Node 17+ 把 localhost 解析到 IPv6
+      // 的 ::1，vite 就只在 ::1 监听。可后端 uvicorn 和这里的 url 都是 IPv4 的 127.0.0.1，
+      // Playwright 探 127.0.0.1:5173 探不到 → 就绪超时。把 vite 也钉到 127.0.0.1，全栈统一到 IPv4。
+      command: 'npm run dev -- --host 127.0.0.1',
       url: 'http://127.0.0.1:5173',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 60_000,
     },
   ],

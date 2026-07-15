@@ -101,8 +101,10 @@ cd ..
 验证后端依赖：
 
 ```bash
-conda run -n packaging python -m pytest backend -q
+PYTHONIOENCODING=utf-8 D:/miniconda3/envs/packaging/python.exe -m pytest backend -q
 ```
+
+> `conda run -n packaging ...` 在输出中文时会因 GBK 编码崩溃，故直接调用环境里的 `python.exe`。
 
 #### 2. 前端依赖
 
@@ -150,7 +152,7 @@ http://localhost:5173
 ```bash
 # 后端
 cd backend
-conda run --no-capture-output -n packaging uvicorn app.main:app --port 8000 --reload
+D:/miniconda3/envs/packaging/python.exe -m uvicorn app.main:app --port 8000 --reload
 
 # 前端，另开终端
 cd frontend
@@ -174,14 +176,17 @@ npm run dev
 
 ## 默认测试数据
 
-前端默认数据用于快速验证多客户配送和筛选：
+前端默认数据共 1140 件，用于验证多客户配送、筛选与多容器类型混装：
 
-- 货品：
-  - 大箱A：600 x 400 x 400，数量 8，客户「甲」，卸货 1，独立放置。
-  - 小箱B：400 x 300 x 300，数量 120，客户「甲」，卸货 1，可上下堆放。
-  - 新货品：500 x 400 x 230，数量 300，客户「乙」，卸货 2，可上下堆放。
+- 货品（合计 1140 件）：
+  - 大箱A：600 x 400 x 400，数量 40，客户「甲」，卸货 1，**不可堆叠且顶部不可承重**。
+  - 小箱B：400 x 300 x 300，数量 300，客户「甲」，卸货 1，可堆叠。
+  - 箱C：500 x 400 x 230，数量 300，客户「乙」，卸货 2，可堆叠。
+  - 箱D：300 x 200 x 200，数量 500，客户「乙」，卸货 2，可堆叠。
 - 托盘：标准托盘 1200 x 1000，数量 4，自重 10，限重 1000，限高 1500。
-- 容器：20GP，5900 x 2350 x 2390，数量 2，载重 28000，后门装货。
+- 容器（两种类型，成本策略会自行择优）：
+  - 20GP：5900 x 2350 x 2390，数量 10，载重 28000，启用成本 2000，后门装货。
+  - 40GP：12030 x 2350 x 2390，数量 5，载重 26700，启用成本 3400，后门装货。
 
 新增货品的卸货顺序默认为空；卡片上不会显示卸货标签。求解前会把空卸货顺序按后端默认值 `1` 处理。
 
@@ -300,20 +305,28 @@ npm run dev
 
 ## 测试
 
+后端单元测试：
+
 ```bash
-conda run -n packaging python -m pytest backend -q
+PYTHONIOENCODING=utf-8 D:/miniconda3/envs/packaging/python.exe -m pytest backend -q
 ```
 
-当前后端测试数：96。
+基准 + 质量退化门禁（关键指标越界即失败）：
 
-前端构建验证：
+```bash
+PYTHONIOENCODING=utf-8 D:/miniconda3/envs/packaging/python.exe scripts/benchmark_solver.py \
+    --iterations 2 --warmups 0 --industrial-strategies --industrial-large
+```
+
+前端构建与浏览器端到端回归（真实 Chromium + 真实后端）：
 
 ```bash
 cd frontend
 npm run build
+PACKAGING_PYTHON=D:/miniconda3/envs/packaging/python.exe npm run e2e
 ```
 
-Vite 可能提示 bundle 大小超过 500 kB，这是当前依赖体积导致的构建警告，不影响功能。
+解释器说明见 `CLAUDE.md` 第 10 节：PATH 上的 `python` 不是本项目的 conda 环境，后端命令必须显式指定。
 
 ## 目录结构
 
@@ -324,14 +337,18 @@ backend/
     api/routes.py      POST /solve、GET /health
     models/schemas.py  Pydantic 数据模型
     core/
-      geometry.py      朝向、尺寸、AABB 几何
-      space.py         极点集合
-      extreme_point.py 极点放置与评分
-      constraints.py   支撑、堆叠、承重约束
-      objectives.py    可插拔优化目标和多客户配送评分
-      palletizer.py    码托盘逻辑与直接装/码托盘决策
-      packer.py        多容器编排主循环
-      ga.py            BRKGA 全局优化
+      geometry.py           朝向、尺寸、AABB 几何
+      space.py              极点集合
+      extreme_point.py      极点放置与评分
+      constraints.py        支撑、堆叠、承重约束
+      objectives.py         可插拔优化目标与配送评分
+      palletizer.py         码托盘逻辑与直接装/码托盘决策
+      packer.py             多容器编排主循环、开箱类型选择
+      industrial.py         工业校验、成本、诊断分层
+      industrial_context.py 增量载荷上下文、堆垛簇分析
+      evaluator.py          0-100 评分与 A~D 等级
+      ga.py                 BRKGA 全局优化
+      performance.py        耗时/计数采集
   tests/               后端单元测试
 frontend/
   src/
@@ -342,8 +359,9 @@ frontend/
     api/               /solve 调用
     utils/             CSV 导出、客户/货品筛选工具
 start.ps1 / start.sh   一键启动脚本
-scripts/               分项启动脚本
-CLAUDE.md              设计说明与里程碑记录
+scripts/               分项启动脚本 + benchmark_solver.py（基准与质量门禁）
+CLAUDE.md              设计约定、路线图与运行命令
+docs/                  评估公式、工业策略、性能优化
 ```
 
 ## 常见问题
@@ -356,4 +374,10 @@ CLAUDE.md              设计说明与里程碑记录
 
 ## 状态
 
-当前已完成：多容器装载、物理约束、托盘化、REST API、3D/2D 可视化、GA 优化、多客户配送、客户/货品筛选、CSV 导出和默认测试数据。后续可继续增强：更细的门洞约束、大算例性能优化、GA 朝向基因、更多报表维度。
+四个阶段（基础系统 / 评估体系 / 性能优化 / 工业策略重构）均已完成，详见 `CLAUDE.md` 第 9 节。
+
+在此之上还有：工业校验模式（重心范围、地板载荷、载荷分布曲线、堆垛簇稳定性与固定能力）、
+质量退化门禁、诊断三层语义、多容器类型混装、前端浏览器端到端回归。
+
+后续候选方向：GA 与工业约束的联合优化（把工业指标并入 fitness）。**尚未确认业务价值**——
+实测多次表明装载密度与堆垛安全在本样例上互斥，收益不确定。
