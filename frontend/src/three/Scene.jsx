@@ -9,6 +9,31 @@ import { deriveVisiblePalletDecks } from '../utils/palletDecks'
 
 const SCALE = 0.01 // mm → 场景单位（1000mm = 10）
 
+// 视口右下角缩放按钮的桥接：OrbitControls 挂载时注册实现，浮层按钮直接调用。
+// 纯视角操作（drei 在 change 事件上自动 invalidate），不碰任何求解数据。
+export const sceneViewControls = {
+  zoomIn: () => {},
+  zoomOut: () => {},
+  reset: () => {},
+}
+
+function bindViewControls(controls) {
+  if (!controls) {
+    sceneViewControls.zoomIn = () => {}
+    sceneViewControls.zoomOut = () => {}
+    sceneViewControls.reset = () => {}
+    return
+  }
+  controls.saveState()
+  const zoomBy = (factor) => {
+    controls.object.position.sub(controls.target).multiplyScalar(factor).add(controls.target)
+    controls.update()
+  }
+  sceneViewControls.zoomIn = () => zoomBy(1 / 1.3)
+  sceneViewControls.zoomOut = () => zoomBy(1.3)
+  sceneViewControls.reset = () => controls.reset()
+}
+
 // 后端坐标 z 向上；three 默认 y 向上。映射 (x,y,z) → (x, z, y)。
 function toScene(x, y, z) {
   return [x * SCALE, z * SCALE, y * SCALE]
@@ -18,8 +43,8 @@ function Box({ box }) {
   return (
     <mesh position={box.position}>
       <boxGeometry args={box.size} />
-      <meshStandardMaterial color={box.color} />
-      <Edges color="#333" />
+      <meshStandardMaterial color={box.color} roughness={0.55} metalness={0.04} />
+      <Edges color="#3d4a5f" />
     </mesh>
   )
 }
@@ -44,8 +69,8 @@ function ContainerBox({ container }) {
   return (
     <mesh position={[w / 2, h / 2, d / 2]}>
       <boxGeometry args={[w, h, d]} />
-      <meshBasicMaterial transparent opacity={0.04} color="#1677ff" />
-      <Edges color="#1677ff" />
+      <meshBasicMaterial transparent opacity={0.06} color="#7ba2f0" />
+      <Edges color="#5b8def" />
     </mesh>
   )
 }
@@ -112,7 +137,7 @@ export default function Scene() {
 
   // 让相机大致对准容器中心
   const cx = (cdef?.inner_length || 5900) * SCALE
-  const camPos = useMemo(() => [cx * 1.2, cx * 1.0, cx * 1.4], [cx])
+  const camPos = useMemo(() => [cx * 1.28, cx * 0.68, cx * 1.48], [cx])
   const controlTarget = useMemo(
     () => (cdef ? [cx / 2, 0, (cdef.inner_width * SCALE) / 2] : [0, 0, 0]),
     [cdef, cx],
@@ -131,8 +156,8 @@ export default function Scene() {
         <Box key={box.key} box={box} />
       ))}
       <CogMarker cog={cog} />
-      <gridHelper args={[200, 40, '#ccc', '#eee']} />
-      <OrbitControls makeDefault target={controlTarget} />
+      <gridHelper args={[200, 40, '#c9d3e0', '#e6ebf2']} />
+      <OrbitControls makeDefault target={controlTarget} ref={bindViewControls} />
     </Canvas>
   )
 }

@@ -1,4 +1,5 @@
-import { Select, Button, Alert, Divider, Space, Switch, Tooltip, Slider } from 'antd'
+import { Select, Button, Alert, Space, Switch, Tooltip, Slider } from 'antd'
+import { CaretRightOutlined, RiseOutlined } from '@ant-design/icons'
 import EditableTable from './EditableTable'
 import { useStore } from '../store/useStore'
 
@@ -36,7 +37,7 @@ const itemFields = [
   { key: 'length', label: '长(cm)', type: 'number' },
   { key: 'width', label: '宽(cm)', type: 'number' },
   { key: 'height', label: '高(cm)', type: 'number' },
-  { key: 'weight', label: '重(kg)', type: 'number' },
+  { key: 'weight', label: '重量(kg)', type: 'number' },
   { key: 'quantity', label: '数量', type: 'number', min: 1 },
   { key: 'stacking_type', label: '堆叠类型', type: 'stacking_type_cards', options: STACKING_TYPE_OPTIONS, defaultValue: 'stackable' },
   { key: 'allowed_rotations', label: '允许摆放姿态', type: 'orientation_groups' },
@@ -184,116 +185,142 @@ export default function EditPanel() {
   return (
     <div className="edit-panel">
       <div className="edit-header">
-        <h1>3D 装箱</h1>
-        <p>维护基础资源，生成可回放的装载方案</p>
+        <span className="edit-header-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+            <path d="M12 3 L20 7.2 L20 16.8 L12 21 L4 16.8 L4 7.2 Z" />
+            <path d="M4 7.2 L12 11.4 L20 7.2" />
+            <path d="M12 11.4 L12 21" />
+          </svg>
+        </span>
+        <div className="edit-header-text">
+          <h1>3D 装箱</h1>
+          <p>维护货品 · 生成装箱方案</p>
+        </div>
       </div>
 
-      <EditableTable kind="items" title="货品" fields={itemFields} />
-      <EditableTable kind="pallets" title="托盘（可选资源）" fields={palletFields} />
-      <EditableTable kind="containers" title="容器" fields={containerFields} />
+      <div className="edit-scroll">
+        <EditableTable kind="items" title="货品" fields={itemFields} />
+        <EditableTable kind="pallets" title="托盘（可选资源）" fields={palletFields} />
+        <EditableTable kind="containers" title="容器" fields={containerFields} />
+      </div>
 
-      <Divider />
-      <div className="solve-card">
-        <div className="solve-grid">
-          <label>
-            <span className="field-label">装箱策略</span>
-            <Select
-              value={objective}
-              onChange={setObjective}
-              options={OBJECTIVES}
-              style={{ width: '100%' }}
-              optionRender={(option) => (
-                <div className="objective-option">
-                  <strong>{option.data.label}</strong>
-                  {option.data.description && <span>{option.data.description}</span>}
-                </div>
-              )}
-            />
-          </label>
-          <div className="objective-meaning">
-            <strong>{selectedObjective.label}</strong>
-            <span>{selectedObjective.description}</span>
-          </div>
-          {isAdvancedObjective(objective) && (
-            <div className="advanced-weights">
-              <div className="advanced-weights-head">
-                <strong>权重</strong>
-                <Button size="small" onClick={resetAdvancedWeights}>恢复默认</Button>
-              </div>
-              <div className="advanced-weight-list">
-                {ADVANCED_WEIGHT_FIELDS.map((field) => {
-                  const value = advancedWeights[field.key] ?? 0
-                  return (
-                    <label className="advanced-weight-row" key={field.key}>
-                      <span className="advanced-weight-label">{field.label}</span>
-                      <Slider
-                        min={0}
-                        max={100}
-                        step={5}
-                        value={Math.round(value * 100)}
-                        onChange={(nextValue) => setAdvancedWeight(field.key, nextValue / 100)}
-                      />
-                      <span className="advanced-weight-value">{Math.round(value * 100)}%</span>
-                    </label>
-                  )
-                })}
-              </div>
+      <div className="solve-dock">
+        <div className="solve-dock-label">装箱策略</div>
+        <Select
+          className="strategy-select"
+          value={objective}
+          onChange={setObjective}
+          options={OBJECTIVES}
+          style={{ width: '100%' }}
+          labelRender={() => (
+            <span className="strategy-selected">
+              <span className="strategy-selected-icon"><RiseOutlined /></span>
+              <span className="strategy-selected-text">
+                <strong>{selectedObjective.label}</strong>
+                <span>{selectedObjective.description}</span>
+              </span>
+            </span>
+          )}
+          optionRender={(option) => (
+            <div className="objective-option">
+              <strong>{option.data.label}</strong>
+              {option.data.description && <span>{option.data.description}</span>}
             </div>
           )}
-          <div className="solve-actions">
-            <Select
-              size="small"
-              value={validationMode}
-              onChange={setValidationMode}
-              options={[{ value: 'standard', label: '标准校验' }, { value: 'industrial', label: '工业校验' }]}
-              style={{ width: 100 }}
-            />
-            <Select
-              size="small"
-              value={palletPolicy}
-              onChange={setPalletPolicy}
-              options={[
-                { value: 'auto', label: '托盘自动' },
-                { value: 'prefer', label: '偏好托盘' },
-                { value: 'avoid', label: '避免托盘' },
-                { value: 'required', label: '必须托盘' },
-              ]}
-              style={{ width: 100 }}
-            />
-            <Select
-              size="small"
-              value={costCurrency}
-              onChange={setCostCurrency}
-              options={['CNY', 'USD', 'EUR'].map((value) => ({ value, label: value }))}
-              style={{ width: 72 }}
-            />
-            {objective === 'safe_loading' && (
-              <Tooltip title="扁平件先落位、少码细高柱，并按固定力自动择箱（工业校验下必要时换更大箱型把货铺开），显著降低堆垛所需固定力；代价是成本可能上升">
-                <Space size={6}>
-                  <Switch size="small" checked={safetyPriority} onChange={setSafetyPriority} />
-                  <span>安全优先</span>
-                </Space>
-              </Tooltip>
-            )}
-            <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
-              <Space size={6}>
-                <Switch size="small" checked={useGa} onChange={setUseGa} />
-                <span>GA 优化</span>
+        />
+        {isAdvancedObjective(objective) && (
+          <div className="advanced-weights">
+            <div className="advanced-weights-head">
+              <strong>权重</strong>
+              <Button size="small" onClick={resetAdvancedWeights}>恢复默认</Button>
+            </div>
+            <div className="advanced-weight-list">
+              {ADVANCED_WEIGHT_FIELDS.map((field) => {
+                const value = advancedWeights[field.key] ?? 0
+                return (
+                  <label className="advanced-weight-row" key={field.key}>
+                    <span className="advanced-weight-label">{field.label}</span>
+                    <Slider
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={Math.round(value * 100)}
+                      onChange={(nextValue) => setAdvancedWeight(field.key, nextValue / 100)}
+                    />
+                    <span className="advanced-weight-value">{Math.round(value * 100)}%</span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        )}
+        <div className="solve-actions">
+          <Select
+            size="small"
+            variant="filled"
+            value={validationMode}
+            onChange={setValidationMode}
+            options={[{ value: 'standard', label: '标准校验' }, { value: 'industrial', label: '工业校验' }]}
+            style={{ width: 100 }}
+          />
+          <Select
+            size="small"
+            variant="filled"
+            value={palletPolicy}
+            onChange={setPalletPolicy}
+            options={[
+              { value: 'auto', label: '托盘自动' },
+              { value: 'prefer', label: '偏好托盘' },
+              { value: 'avoid', label: '避免托盘' },
+              { value: 'required', label: '必须托盘' },
+            ]}
+            style={{ width: 100 }}
+          />
+          <Select
+            size="small"
+            variant="filled"
+            value={costCurrency}
+            onChange={setCostCurrency}
+            options={['CNY', 'USD', 'EUR'].map((value) => ({ value, label: value }))}
+            style={{ width: 72 }}
+          />
+          {objective === 'safe_loading' && (
+            <Tooltip title="扁平件先落位、少码细高柱，并按固定力自动择箱（工业校验下必要时换更大箱型把货铺开），显著降低堆垛所需固定力；代价是成本可能上升">
+              <Space size={6} className="solve-toggle">
+                <Switch size="small" checked={safetyPriority} onChange={setSafetyPriority} />
+                <span>安全优先</span>
               </Space>
             </Tooltip>
+          )}
+          <Tooltip title="遗传算法对放置顺序做全局优化，更慢但通常更优">
+            <Space size={6} className="solve-toggle">
+              <Switch size="small" checked={useGa} onChange={setUseGa} />
+              <span>GA 优化</span>
+            </Space>
+          </Tooltip>
+          {useGa && (
             <Select
               size="small"
+              variant="filled"
               value={gaSpeed}
               onChange={setGaSpeed}
               options={GA_SPEED_OPTIONS}
-              disabled={!useGa}
               style={{ width: 82 }}
             />
-            <Button type="primary" loading={loading} onClick={solve}>{solveButtonText}</Button>
-          </div>
+          )}
         </div>
+        <Button
+          className="solve-button"
+          block
+          type="primary"
+          icon={<CaretRightOutlined />}
+          loading={loading}
+          onClick={solve}
+        >
+          {solveButtonText}
+        </Button>
+        {error && <Alert type="error" message={error} showIcon />}
       </div>
-      {error && <Alert style={{ marginTop: 12 }} type="error" message={error} showIcon />}
     </div>
   )
 }

@@ -6,6 +6,38 @@ import { calculateCenterOfGravity } from '../utils/cog'
 import { filterPlacements } from '../utils/customerFilter'
 import { deriveVisiblePalletDecks } from '../utils/palletDecks'
 
+// 空容器俯视占位：圆角外框 + 内部浅网格，只是示意，不承载数据。
+function TopViewPlaceholder({ length, width }) {
+  const PAD = length * 0.02
+  const cols = 12
+  const rowCount = 4
+  const verticals = Array.from({ length: cols - 1 }, (_, i) => ((i + 1) * length) / cols)
+  const horizontals = Array.from({ length: rowCount - 1 }, (_, i) => ((i + 1) * width) / rowCount)
+  return (
+    <div className="topview-placeholder-wrap">
+      <svg
+        viewBox={`${-PAD} ${-PAD} ${length + 2 * PAD} ${width + 2 * PAD}`}
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <rect
+          x={0}
+          y={0}
+          width={length}
+          height={width}
+          rx={length * 0.004}
+          fill="#f2f5fd"
+          stroke="#93a4e0"
+          strokeWidth={length * 0.0028}
+        />
+        <g stroke="#dde4f5" strokeWidth={length * 0.0012}>
+          {verticals.map((x) => <line key={`v-${x}`} x1={x} y1={0} x2={x} y2={width} />)}
+          {horizontals.map((y) => <line key={`h-${y}`} x1={0} y1={y} x2={length} y2={y} />)}
+        </g>
+      </svg>
+    </div>
+  )
+}
+
 // 2D 俯视装载图：沿 z 轴向下看，画出当前容器各货品在 x-y 平面的投影。
 // 低层先画、高层后画（叠在上面），高度越高描边越深以示层次。
 export default function TopView() {
@@ -53,8 +85,12 @@ export default function TopView() {
     [filteredPlacements, loaded?.pallet_instances, palletMap],
   )
 
-  if (!solution) return <Empty style={{ marginTop: 60 }} description="先求解" />
-  if (!loaded || !cdef) return <Empty style={{ marginTop: 60 }} description="无数据" />
+  // 空状态：画一个待装载的空容器俯视框（取第一个容器类型的比例），与 3D 视图的空态呼应。
+  if (!solution || !loaded || !cdef) {
+    const def = cdef || containersInput[0]
+    if (!def) return <Empty style={{ marginTop: 60 }} description="请先录入容器" />
+    return <TopViewPlaceholder length={def.inner_length || 5900} width={def.inner_width || 2350} />
+  }
 
   const L = cdef.inner_length
   const W = cdef.inner_width

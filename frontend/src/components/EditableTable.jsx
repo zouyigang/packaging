@@ -1,5 +1,5 @@
 import { Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Switch, Tooltip } from 'antd'
-import { DeleteOutlined, EditOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons'
+import { CheckOutlined, DeleteOutlined, DownOutlined, EditOutlined, LockOutlined, PlusOutlined, RightOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 import { useStore } from '../store/useStore'
 import { colorForCustomer } from '../three/geometry'
@@ -37,6 +37,66 @@ const ORIENTATION_GROUPS = [
   },
 ]
 
+// 货品弹窗的分区布局：基本信息两行网格 + 堆叠/姿态紧凑卡片 + 可折叠「更多参数」。
+const STACKING_SHORT_LABELS = {
+  not_stackable: '独立放置',
+  same_item_only: '仅同品堆叠',
+  stackable: '可上下堆放',
+  support_only: '仅作下层支撑',
+  top_only: '仅作上层货品',
+}
+const ITEM_MORE_FIELD_KEYS = [
+  'max_load_top',
+  'category',
+  'customer_id',
+  'order_id',
+  'destination_id',
+  'stop_seq',
+  'pallet_group',
+  'friction_coefficient',
+  'priority',
+]
+const ITEM_FIELD_PLACEHOLDERS = {
+  max_load_top: '不限',
+  category: '如 五金 / 塑件',
+  customer_id: '客户名称',
+  order_id: '关联订单号',
+  destination_id: '目的港 / 城市',
+  stop_seq: '数字越小越先卸',
+  pallet_group: '同组不与他组混托',
+  friction_coefficient: '默认 0.5',
+}
+
+// 容器弹窗：基本信息 + 装货入口卡片 + 可折叠「更多参数」（按成本/固定/重心/加速度/开口分组）。
+const CONTAINER_FIELD_PLACEHOLDERS = {
+  use_cost: '0',
+  max_floor_load_kg_m2: '不限',
+  default_friction_coefficient: '0.5',
+  longitudinal_restraint_capacity_kn: '不限',
+  transverse_restraint_capacity_kn: '不限',
+  cog_x_min_ratio: '0',
+  cog_y_min_ratio: '0',
+  cog_z_max_ratio: '1',
+  cog_x_max_ratio: '1',
+  cog_y_max_ratio: '1',
+  longitudinal_g: '0',
+  transverse_g: '0',
+  vertical_g: '0',
+  load_distribution_curve_json: '[{"h":0,"load":1}, …]',
+}
+// 「更多参数」里用更短的标签（分组标题已给出上下文），不改动 EditPanel 里的字段定义。
+const CONTAINER_FIELD_LABELS = {
+  cog_x_min_ratio: 'X 下限',
+  cog_y_min_ratio: 'Y 下限',
+  cog_z_max_ratio: 'Z 上限',
+  cog_x_max_ratio: 'X 上限',
+  cog_y_max_ratio: 'Y 上限',
+  longitudinal_g: '纵向加速度',
+  transverse_g: '横向加速度',
+  vertical_g: '垂向加速度',
+  load_distribution_curve_json: '载荷曲线 JSON',
+}
+
 export default function EditableTable({ kind, title, fields }) {
   const rows = useStore((s) => s[kind])
   const updateRow = useStore((s) => s.updateRow)
@@ -45,6 +105,18 @@ export default function EditableTable({ kind, title, fields }) {
   const createBlankRow = useStore((s) => s.createBlankRow)
   const [editingId, setEditingId] = useState(null)
   const [addingRow, setAddingRow] = useState(null)
+  const [collapsed, setCollapsed] = useState(false)
+  const isItems = kind === 'items'
+  const isContainers = kind === 'containers'
+  const useSheet = isItems || isContainers
+  const SheetForm = isItems ? ItemModalForm : ContainerModalForm
+  const SheetTitle = isItems ? ItemModalTitle : ContainerModalTitle
+  const sheetSubtitleAdd = isItems
+    ? '填写尺寸与堆叠规则，其余参数可展开补充'
+    : '填写内尺寸与装货入口，力学与重心参数可展开补充'
+  const sheetWidth = isItems ? 860 : 920
+  const sheetClassName = isContainers ? 'item-modal container-modal' : 'item-modal'
+  const [mainTitle, hintTitle] = splitSectionTitle(title)
 
   const editingRow = rows.find((row) => row.id === editingId) || null
 
@@ -65,13 +137,22 @@ export default function EditableTable({ kind, title, fields }) {
   return (
     <section className="resource-section">
       <div className="resource-section-head">
-        <strong>{title}</strong>
+        <strong>{mainTitle}</strong>
+        {hintTitle && <span className="resource-hint">{hintTitle}</span>}
         <span className="resource-count">{rows.length}</span>
         <div style={{ flex: 1 }} />
-        <Button size="small" icon={<PlusOutlined />} onClick={handleAddClick}>新增</Button>
+        <Button size="small" color="primary" variant="filled" icon={<PlusOutlined />} onClick={handleAddClick}>新增</Button>
+        <Button
+          size="small"
+          type="text"
+          className="resource-collapse"
+          aria-label={collapsed ? `展开${mainTitle}` : `折叠${mainTitle}`}
+          icon={<DownOutlined className={`resource-collapse-icon ${collapsed ? 'is-collapsed' : ''}`} />}
+          onClick={() => setCollapsed((value) => !value)}
+        />
       </div>
 
-      {rows.length === 0 ? (
+      {!collapsed && (rows.length === 0 ? (
         <div className="resource-empty">
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
         </div>
@@ -86,19 +167,36 @@ export default function EditableTable({ kind, title, fields }) {
             onRemove={() => removeRow(kind, row.id)}
           />
         ))
-      )}
+      ))}
 
       <Modal
-        title={`新增${title}`}
+        title={useSheet ? (
+          <SheetTitle title={`新增${title}`} subtitle={sheetSubtitleAdd} />
+        ) : `新增${title}`}
         open={!!addingRow}
         onCancel={() => setAddingRow(null)}
         onOk={handleAddConfirm}
         okText="确定"
         cancelText="取消"
-        width={900}
+        width={useSheet ? sheetWidth : 900}
+        centered={useSheet}
+        className={useSheet ? sheetClassName : undefined}
+        footer={useSheet ? (
+          <div className="item-modal-footer">
+            <span className="item-dim-summary">{sheetSummary(kind, addingRow)}</span>
+            <Button onClick={() => setAddingRow(null)}>取消</Button>
+            <Button type="primary" icon={<CheckOutlined />} onClick={handleAddConfirm}>确定</Button>
+          </div>
+        ) : undefined}
         destroyOnHidden
       >
-        {addingRow && (
+        {addingRow && (useSheet ? (
+          <SheetForm
+            fields={fields}
+            row={addingRow}
+            onChange={handleAddChange}
+          />
+        ) : (
           <div className="modal-field-grid">
             {fields.map((field) => (
               <FieldEditor
@@ -110,17 +208,32 @@ export default function EditableTable({ kind, title, fields }) {
               />
             ))}
           </div>
-        )}
+        ))}
       </Modal>
       <Modal
-        title={editingRow ? `${title} · ${editingRow.name || title}` : title}
+        title={editingRow ? (useSheet ? (
+          <SheetTitle title={`${title} · ${editingRow.name || title}`} subtitle="修改即时保存，可随时关闭" />
+        ) : `${title} · ${editingRow.name || title}`) : title}
         open={!!editingRow}
         onCancel={() => setEditingId(null)}
-        footer={null}
-        width={900}
+        footer={useSheet && editingRow ? (
+          <div className="item-modal-footer">
+            <span className="item-dim-summary">{sheetSummary(kind, editingRow)}</span>
+            <Button type="primary" onClick={() => setEditingId(null)}>完成</Button>
+          </div>
+        ) : null}
+        width={useSheet ? sheetWidth : 900}
+        centered={useSheet}
+        className={useSheet ? sheetClassName : undefined}
         destroyOnHidden
       >
-        {editingRow && (
+        {editingRow && (useSheet ? (
+          <SheetForm
+            fields={fields}
+            row={editingRow}
+            onChange={(field, value) => updateRow(kind, editingRow.id, makePatch(field, value))}
+          />
+        ) : (
           <div className="modal-field-grid">
             {fields.map((field) => (
               <FieldEditor
@@ -132,10 +245,15 @@ export default function EditableTable({ kind, title, fields }) {
               />
             ))}
           </div>
-        )}
+        ))}
       </Modal>
     </section>
   )
+}
+
+function splitSectionTitle(title) {
+  const match = /^(.+?)（(.+)）$/.exec(title)
+  return match ? [match[1], match[2]] : [title, '']
 }
 
 function customerAccent(customerName) {
@@ -168,6 +286,9 @@ function ResourceRow({ row, fields, kind, onEdit, onRemove }) {
     : null
   const accent = customerName ? customerAccent(customerName) : null
 
+  const quantity = Number(row.quantity)
+  const showQuantity = Number.isFinite(quantity) && quantity > 0
+
   return (
     <div
       className="resource-row"
@@ -181,16 +302,12 @@ function ResourceRow({ row, fields, kind, onEdit, onRemove }) {
       <button type="button" onClick={onEdit} className="resource-row-main">
         <div className="resource-row-title">
           <strong>{title}</strong>
-          {isItem && (
-            <span className="resource-row-meta">
-              {customerName && <span className="resource-customer-badge">客户: {customerName}</span>}
-              <span className={`resource-stop-badge${stopSeq === null ? ' resource-stop-badge-empty' : ''}`}>{stopSeq !== null ? `卸货: ${stopSeq}` : ''}</span>
-            </span>
-          )}
+          {isItem && customerName && <span className="resource-customer-badge">客户 {customerName}</span>}
+          {isItem && stopSeq !== null && <span className="resource-stop-badge">卸货 {stopSeq}</span>}
         </div>
         <div className="resource-summary">{summary || '-'}</div>
         {chips.length > 0 && (
-          <Space size={6} wrap style={{ marginTop: 6 }}>
+          <Space size={6} wrap style={{ marginTop: 7 }}>
             {chips.map((chip) => {
               const node = <span className="resource-chip">{chip.text}</span>
               return chip.tooltip ? (
@@ -202,12 +319,17 @@ function ResourceRow({ row, fields, kind, onEdit, onRemove }) {
           </Space>
         )}
       </button>
-      <Tooltip title="编辑">
-        <Button size="small" type="text" icon={<EditOutlined />} onClick={onEdit} />
-      </Tooltip>
-      <Tooltip title="删除">
-        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={onRemove} />
-      </Tooltip>
+      <div className="resource-row-side">
+        {showQuantity && <span className="resource-qty">×{quantity}</span>}
+        <div className="resource-row-buttons">
+          <Tooltip title="编辑">
+            <Button size="small" type="text" icon={<EditOutlined />} onClick={onEdit} />
+          </Tooltip>
+          <Tooltip title="删除">
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={onRemove} />
+          </Tooltip>
+        </div>
+      </div>
     </div>
   )
 }
@@ -231,7 +353,7 @@ function makePatch(field, value) {
 
 function renderControl(field, row, value, onChange) {
   if (field.type === 'text') {
-    return <Input value={value ?? ''} onChange={(e) => onChange(e.target.value)} />
+    return <Input value={value ?? ''} placeholder={field.placeholder} onChange={(e) => onChange(e.target.value)} />
   }
   if (field.type === 'bool') {
     return <Switch checked={!!value} onChange={onChange} />
@@ -253,7 +375,7 @@ function renderControl(field, row, value, onChange) {
   }
   if (field.type === 'stacking_type_cards') {
     return (
-      <StackingTypeEditor
+      <StackingTypeCards
         value={value ?? field.defaultValue}
         options={field.options || []}
         onChange={onChange}
@@ -261,7 +383,7 @@ function renderControl(field, row, value, onChange) {
     )
   }
   if (field.type === 'orientation_groups') {
-    return <OrientationEditor row={row} value={value} onChange={onChange} />
+    return <OrientationCards row={row} value={value} onChange={onChange} />
   }
   if (field.type === 'loading_accesses') {
     return <LoadingAccessEditor field={field} row={row} value={value} onChange={onChange} />
@@ -273,6 +395,7 @@ function renderControl(field, row, value, onChange) {
       value={lockedTopLoad ? 0 : value}
       min={field.min ?? 0}
       disabled={lockedTopLoad}
+      placeholder={field.placeholder}
       onChange={onChange}
     />
   )
@@ -282,25 +405,22 @@ function isTopLoadLocked(stackingType) {
   return TOP_LOAD_LOCKED_STACKING_TYPES.has(stackingType)
 }
 
-function StackingTypeEditor({ value, options, onChange }) {
+function StackingTypeCards({ value, options, onChange }) {
   return (
-    <div className="stacking-grid">
+    <div className="stacking-compact-grid">
       {options.map((option) => {
         const active = value === option.value
         return (
           <button
             key={option.value}
             type="button"
-            className={`stacking-card ${active ? 'is-active' : ''}`}
+            className={`stacking-compact-card ${active ? 'is-active' : ''}`}
             aria-pressed={active}
+            title={option.description}
             onClick={() => onChange(option.value)}
           >
-            <div className="stacking-card-head">
-              <span className="stacking-radio" />
-              <strong>{option.label}</strong>
-            </div>
-            <StackingFigure type={option.value} active={active} />
-            <p>{option.description}</p>
+            <StackingGlyph type={option.value} />
+            <strong>{STACKING_SHORT_LABELS[option.value] ?? option.label}</strong>
           </button>
         )
       })}
@@ -308,89 +428,64 @@ function StackingTypeEditor({ value, options, onChange }) {
   )
 }
 
-function StackingFigure({ type, active }) {
-  const primary = active ? '#176bff' : '#8da2c0'
-  const primaryFill = active ? '#bfdbfe' : '#e4e9f1'
-  const lowerFill = active ? '#d9e7ff' : '#eef2f7'
-  const upperFill = active ? '#bbf7d0' : '#e5e7eb'
-  const mutedStroke = active ? '#5b7fb7' : '#98a2b3'
-
+function StackingGlyph({ type }) {
+  const box = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinejoin: 'round' }
+  const arrow = { stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', fill: 'currentColor' }
   return (
-    <svg className="stacking-figure" viewBox="0 0 160 120" role="img" aria-hidden="true">
-      <line x1="20" y1="104" x2="140" y2="104" stroke="#cbd5e1" strokeWidth="2" />
+    <svg className="stacking-glyph" viewBox="0 0 26 26" aria-hidden="true">
       {type === 'not_stackable' && (
         <>
-          <Block x={58} y={70} fill={primaryFill} stroke={primary} label="本品" />
-          <StopMark x={80} y={38} />
-          <StopMark x={80} y={98} />
+          <rect x="6.5" y="13.5" width="13" height="8" rx="1.5" {...box} />
+          <g stroke="#ef4444" strokeWidth="2.1" strokeLinecap="round">
+            <line x1="10.6" y1="4.6" x2="15.4" y2="9.4" />
+            <line x1="15.4" y1="4.6" x2="10.6" y2="9.4" />
+          </g>
         </>
       )}
       {type === 'same_item_only' && (
         <>
-          <Block x={58} y={76} fill={primaryFill} stroke={primary} label="同" />
-          <Block x={58} y={52} fill={primaryFill} stroke={primary} label="同" />
-          <Block x={58} y={28} fill={primaryFill} stroke={primary} label="同" />
+          <rect x="6.5" y="4.5" width="13" height="6.5" rx="1.3" {...box} />
+          <rect x="6.5" y="15" width="13" height="6.5" rx="1.3" {...box} />
+          <line x1="10" y1="7.75" x2="16" y2="7.75" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          <line x1="10" y1="18.25" x2="16" y2="18.25" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
         </>
       )}
       {type === 'stackable' && (
         <>
-          <Block x={58} y={76} fill={lowerFill} stroke={mutedStroke} label="下" />
-          <Block x={58} y={52} fill={primaryFill} stroke={primary} label="本" />
-          <Block x={58} y={28} fill={upperFill} stroke="#22c55e" label="上" />
+          <rect x="6.5" y="9.5" width="13" height="7" rx="1.3" {...box} />
+          <g {...arrow}>
+            <line x1="13" y1="6.5" x2="13" y2="3.5" fill="none" />
+            <path d="M13 1.6 L10.8 4.8 L15.2 4.8 Z" stroke="none" />
+            <line x1="13" y1="19.5" x2="13" y2="22.5" fill="none" />
+            <path d="M13 24.4 L10.8 21.2 L15.2 21.2 Z" stroke="none" />
+          </g>
         </>
       )}
       {type === 'support_only' && (
         <>
-          <Block x={58} y={76} fill={primaryFill} stroke={primary} label="本" />
-          <Block x={58} y={52} fill={upperFill} stroke="#22c55e" label="上" />
-          <Arrow x={120} y1={84} y2={46} active={active} />
+          <rect x="6.5" y="14" width="13" height="7.5" rx="1.4" {...box} />
+          <g {...arrow}>
+            <line x1="13" y1="11" x2="13" y2="5" fill="none" />
+            <path d="M13 2.9 L10.6 6.4 L15.4 6.4 Z" stroke="none" />
+          </g>
         </>
       )}
       {type === 'top_only' && (
         <>
-          <Block x={58} y={76} fill={lowerFill} stroke={mutedStroke} label="下" />
-          <Block x={58} y={52} fill={primaryFill} stroke={primary} label="本" />
-          <StopMark x={80} y={30} />
+          <rect x="6.5" y="4.5" width="13" height="7.5" rx="1.4" {...box} />
+          <g {...arrow}>
+            <line x1="13" y1="15" x2="13" y2="21" fill="none" />
+            <path d="M13 23.1 L10.6 19.6 L15.4 19.6 Z" stroke="none" />
+          </g>
         </>
       )}
     </svg>
   )
 }
 
-function Block({ x, y, fill, stroke, label }) {
-  return (
-    <g>
-      <rect x={x} y={y} width="44" height="22" rx="3" fill={fill} stroke={stroke} />
-      <text x={x + 22} y={y + 15} textAnchor="middle">{label}</text>
-    </g>
-  )
-}
-
-function StopMark({ x, y }) {
-  return (
-    <g stroke="#ef4444" strokeWidth="3" strokeLinecap="round">
-      <line x1={x - 8} y1={y - 8} x2={x + 8} y2={y + 8} />
-      <line x1={x + 8} y1={y - 8} x2={x - 8} y2={y + 8} />
-    </g>
-  )
-}
-
-function Arrow({ x, y1, y2, active }) {
-  const color = active ? '#176bff' : '#98a2b3'
-  return (
-    <g stroke={color} fill={color} strokeWidth="3" strokeLinecap="round">
-      <line x1={x} y1={y1} x2={x} y2={y2} />
-      <path d={`M${x} ${y2 - 8} L${x - 7} ${y2 + 4} L${x + 7} ${y2 + 4} Z`} stroke="none" />
-    </g>
-  )
-}
-
-function OrientationEditor({ row, value, onChange }) {
+function OrientationCards({ row, value, onChange }) {
   const rotations = normalizeRotations(value)
   const active = new Set(rotations)
-
-  const setAll = () => onChange(ORIENTATION_ORDER)
-  const setDefaultOnly = () => onChange(ORIENTATION_GROUPS[0].rotations)
 
   const toggleGroup = (group, checked) => {
     if (group.fixed) return
@@ -404,47 +499,363 @@ function OrientationEditor({ row, value, onChange }) {
   }
 
   return (
-    <div className="orientation-editor">
-      <div className="orientation-actions">
-        <Button size="small" onClick={setAll}>全部允许</Button>
-        <Button size="small" onClick={setDefaultOnly}>仅默认姿态</Button>
-      </div>
-      <div className="orientation-grid">
-        {ORIENTATION_GROUPS.map((group) => {
-          const checked = group.rotations.every((rotation) => active.has(rotation))
-          return (
-            <div
-              key={group.key}
-              role="button"
-              tabIndex={0}
-              className={`orientation-option ${checked ? 'is-active' : ''}`}
-              onClick={() => toggleGroup(group, !checked)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') toggleGroup(group, !checked)
-              }}
-            >
-              <div className="orientation-option-head">
-                <Checkbox
-                  checked={checked}
-                  disabled={group.fixed}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={(event) => toggleGroup(group, event.target.checked)}
-                >
-                  {group.label}
-                </Checkbox>
-              </div>
-              <div className="orientation-figure-button">
-                <OrientationFigure group={group} row={row} active={checked} />
-              </div>
-              <div className="orientation-meta">
-                <span>底面：{group.base}</span>
-                <span>竖直：{group.vertical}</span>
-              </div>
-              <p>{group.description}</p>
+    <div className="orientation-compact-grid">
+      {ORIENTATION_GROUPS.map((group) => {
+        const checked = group.rotations.every((rotation) => active.has(rotation))
+        return (
+          <div
+            key={group.key}
+            role="button"
+            tabIndex={0}
+            className={`orientation-compact-card ${checked ? 'is-active' : ''}`}
+            title={group.description}
+            onClick={() => toggleGroup(group, !checked)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') toggleGroup(group, !checked)
+            }}
+          >
+            <div className="orientation-compact-head">
+              <Checkbox
+                checked={checked}
+                disabled={group.fixed}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => toggleGroup(group, event.target.checked)}
+              >
+                {group.label}
+              </Checkbox>
             </div>
-          )
-        })}
-      </div>
+            <div className="orientation-compact-figure">
+              <OrientationFigure group={group} row={row} active={checked} />
+            </div>
+            <div className="orientation-compact-caption">底面 {group.base.replace(/\s/g, '')} · 竖直 {group.vertical}</div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ItemModalTitle({ title, subtitle }) {
+  return (
+    <div className="item-modal-title">
+      <span className="item-modal-title-icon">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+          <path d="M12 3 L20 7.2 L20 16.8 L12 21 L4 16.8 L4 7.2 Z" />
+          <path d="M4 7.2 L12 11.4 L20 7.2" />
+          <path d="M12 11.4 L12 21" />
+        </svg>
+      </span>
+      <span className="item-modal-title-text">
+        <strong>{title}</strong>
+        <span>{subtitle}</span>
+      </span>
+    </div>
+  )
+}
+
+function dimensionSummary(row) {
+  const dims = ['length', 'width', 'height'].map((key) => Number(row?.[key]))
+  if (dims.some((dim) => !Number.isFinite(dim) || dim <= 0)) return '尺寸待完善'
+  return `尺寸 ${dims[0]} × ${dims[1]} × ${dims[2]} cm`
+}
+
+function ContainerModalTitle({ title, subtitle }) {
+  return (
+    <div className="item-modal-title">
+      <span className="item-modal-title-icon">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+          <rect x="3.5" y="5" width="17" height="14" rx="1.6" />
+          <path d="M3.5 9.7 L20.5 9.7" />
+          <path d="M9.2 9.7 L9.2 19" />
+          <path d="M14.8 9.7 L14.8 19" />
+        </svg>
+      </span>
+      <span className="item-modal-title-text">
+        <strong>{title}</strong>
+        <span>{subtitle}</span>
+      </span>
+    </div>
+  )
+}
+
+function sheetSummary(kind, row) {
+  if (kind === 'containers') return containerSummary(row)
+  return dimensionSummary(row)
+}
+
+function containerSummary(row) {
+  const dims = ['inner_length', 'inner_width', 'inner_height'].map((key) => Number(row?.[key]))
+  const dimText = dims.some((dim) => !Number.isFinite(dim) || dim <= 0)
+    ? '内尺寸待完善'
+    : `内尺寸 ${dims[0]} × ${dims[1]} × ${dims[2]} cm`
+  const payload = Number(row?.max_payload)
+  if (!Number.isFinite(payload) || payload <= 0) return dimText
+  const tons = payload / 1000
+  const tonText = Number.isInteger(tons) ? tons : Number(tons.toFixed(1))
+  return `${dimText} · 载重 ${tonText} t`
+}
+
+function ContainerField({ field, row, onChange, span }) {
+  if (!field) return null
+  const placeholder = CONTAINER_FIELD_PLACEHOLDERS[field.key]
+  const merged = placeholder ? { ...field, placeholder } : field
+  const label = CONTAINER_FIELD_LABELS[field.key] ?? field.label
+  return (
+    <div className={`item-field${span ? ' container-field-span' : ''}`} style={{ minWidth: 0 }}>
+      <span className="field-label">{label}</span>
+      {renderControl(merged, row, row[field.key], (value) => onChange(field, value))}
+    </div>
+  )
+}
+
+function ContainerModalForm({ fields, row, onChange }) {
+  const [moreOpen, setMoreOpen] = useState(false)
+  const byKey = Object.fromEntries(fields.map((field) => [field.key, field]))
+  const accessField = byKey.loading_accesses
+  const accesses = normalizeAccesses(row.loading_accesses, row, accessField?.defaultValue)
+  const enabledCount = accesses.length
+  const totalCount = (accessField?.options || []).length
+
+  return (
+    <div className="item-form">
+      <section className="item-form-section">
+        <div className="item-section-head">
+          <span className="item-section-title">基本信息</span>
+        </div>
+        <div className="item-form-row container-row-name">
+          <ContainerField field={byKey.name} row={row} onChange={onChange} />
+          <ContainerField field={byKey.quantity} row={row} onChange={onChange} />
+        </div>
+        <div className="item-form-row container-row-dims">
+          <ContainerField field={byKey.inner_length} row={row} onChange={onChange} />
+          <ContainerField field={byKey.inner_width} row={row} onChange={onChange} />
+          <ContainerField field={byKey.inner_height} row={row} onChange={onChange} />
+        </div>
+        <div className="item-form-row container-row-payload">
+          <ContainerField field={byKey.max_payload} row={row} onChange={onChange} />
+          <ContainerField field={byKey.equipment_profile} row={row} onChange={onChange} />
+        </div>
+      </section>
+
+      {accessField && (
+        <section className="item-form-section">
+          <div className="item-section-head">
+            <span className="item-section-title">装货入口</span>
+            <span className="item-section-hint">已启用 {enabledCount} / {totalCount} 个入口</span>
+          </div>
+          <LoadingAccessEditor
+            field={accessField}
+            row={row}
+            value={row.loading_accesses}
+            onChange={(value) => onChange(accessField, value)}
+            compact
+          />
+        </section>
+      )}
+
+      <section className="item-form-section item-more-section">
+        <button
+          type="button"
+          className="item-more-toggle"
+          aria-expanded={moreOpen}
+          onClick={() => setMoreOpen((open) => !open)}
+        >
+          <span className="item-section-title">更多参数</span>
+          <span className="item-section-hint">成本 · 固定能力 · 重心限制 · 加速度 · 开口范围（选填）</span>
+          <RightOutlined className={`item-more-chevron ${moreOpen ? 'is-open' : ''}`} />
+        </button>
+        {moreOpen && (
+          <div className="container-more">
+            <div className="container-subsection">
+              <span className="container-sub-title">成本与地板</span>
+              <div className="container-sub-grid">
+                <ContainerField field={byKey.use_cost} row={row} onChange={onChange} />
+                <ContainerField field={byKey.max_floor_load_kg_m2} row={row} onChange={onChange} />
+                <ContainerField field={byKey.default_friction_coefficient} row={row} onChange={onChange} />
+              </div>
+            </div>
+            <div className="container-subsection">
+              <span className="container-sub-title">固定与稳定</span>
+              <div className="container-sub-grid">
+                <ContainerField field={byKey.restraint_mode} row={row} onChange={onChange} />
+                <ContainerField field={byKey.longitudinal_restraint_capacity_kn} row={row} onChange={onChange} />
+                <ContainerField field={byKey.transverse_restraint_capacity_kn} row={row} onChange={onChange} />
+              </div>
+            </div>
+            <div className="container-subsection">
+              <span className="container-sub-title">重心允许范围 (0–1)</span>
+              <div className="container-sub-grid">
+                <ContainerField field={byKey.cog_x_min_ratio} row={row} onChange={onChange} />
+                <ContainerField field={byKey.cog_y_min_ratio} row={row} onChange={onChange} />
+                <ContainerField field={byKey.cog_z_max_ratio} row={row} onChange={onChange} />
+                <ContainerField field={byKey.cog_x_max_ratio} row={row} onChange={onChange} />
+                <ContainerField field={byKey.cog_y_max_ratio} row={row} onChange={onChange} />
+              </div>
+            </div>
+            <div className="container-subsection">
+              <span className="container-sub-title">加速度 (G) 与载荷曲线</span>
+              <div className="container-sub-grid">
+                <ContainerField field={byKey.longitudinal_g} row={row} onChange={onChange} />
+                <ContainerField field={byKey.transverse_g} row={row} onChange={onChange} />
+                <ContainerField field={byKey.vertical_g} row={row} onChange={onChange} />
+                <ContainerField field={byKey.load_distribution_curve_json} row={row} onChange={onChange} span />
+              </div>
+            </div>
+            {accessField && (
+              <div className="container-subsection">
+                <span className="container-sub-title">各门开口范围 (CM)</span>
+                <OpeningRangeTable field={accessField} row={row} />
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+// 开口范围只读展示：与旧版卡片内锁定字段同源（accessDefaultValues），仅换成分组表格布局。
+function OpeningRangeTable({ field, row }) {
+  const options = field.options || []
+  const accesses = normalizeAccesses(row.loading_accesses, row, field.defaultValue)
+  return (
+    <div className="opening-range-table">
+      {accesses.map((access) => {
+        const label = options.find((option) => option.value === access.side)?.label || access.side
+        const defaults = accessDefaultValues(row, access.side)
+        return (
+          <div className="opening-range-row" key={access.side}>
+            <span className="opening-range-label"><i />{label}</span>
+            <InputNumber size="small" disabled value={defaults.door_width} />
+            <InputNumber size="small" disabled value={defaults.door_height} />
+            <InputNumber size="small" disabled value={defaults.opening_start} />
+            <InputNumber size="small" disabled value={defaults.opening_end} />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ItemField({ field, row, onChange }) {
+  if (!field) return null
+  const placeholder = ITEM_FIELD_PLACEHOLDERS[field.key]
+  const merged = placeholder ? { ...field, placeholder } : field
+  return (
+    <div className="item-field" style={{ minWidth: 0 }}>
+      <span className="field-label">{field.label}</span>
+      {renderControl(merged, row, row[field.key], (value) => onChange(field, value))}
+    </div>
+  )
+}
+
+function ItemModalForm({ fields, row, onChange }) {
+  const [moreOpen, setMoreOpen] = useState(false)
+  const byKey = Object.fromEntries(fields.map((field) => [field.key, field]))
+  const stackingField = byKey.stacking_type
+  const orientationField = byKey.allowed_rotations
+  const mustLoadField = byKey.must_load
+  const stackingValue = row.stacking_type ?? stackingField?.defaultValue
+  const selectedStacking = (stackingField?.options || []).find((option) => option.value === stackingValue)
+  const rotations = normalizeRotations(row.allowed_rotations)
+  const allAllowed = rotations.length === ORIENTATION_ORDER.length
+  const defaultOnly = !allAllowed && rotations.length === ORIENTATION_GROUPS[0].rotations.length
+
+  return (
+    <div className="item-form">
+      <section className="item-form-section">
+        <div className="item-section-head">
+          <span className="item-section-title">基本信息</span>
+        </div>
+        <div className="item-form-row item-form-row-name">
+          <ItemField field={byKey.name} row={row} onChange={onChange} />
+          <ItemField field={byKey.quantity} row={row} onChange={onChange} />
+          <ItemField field={byKey.weight} row={row} onChange={onChange} />
+        </div>
+        <div className="item-form-row item-form-row-dims">
+          <ItemField field={byKey.length} row={row} onChange={onChange} />
+          <ItemField field={byKey.width} row={row} onChange={onChange} />
+          <ItemField field={byKey.height} row={row} onChange={onChange} />
+        </div>
+      </section>
+
+      {stackingField && (
+        <section className="item-form-section">
+          <div className="item-section-head">
+            <span className="item-section-title">堆叠类型</span>
+            {selectedStacking?.description && (
+              <span className="item-section-hint">{selectedStacking.description}</span>
+            )}
+          </div>
+          <StackingTypeCards
+            value={stackingValue}
+            options={stackingField.options || []}
+            onChange={(value) => onChange(stackingField, value)}
+          />
+        </section>
+      )}
+
+      {orientationField && (
+        <section className="item-form-section">
+          <div className="item-section-head">
+            <span className="item-section-title">允许摆放姿态</span>
+            <div className="item-segment">
+              <button
+                type="button"
+                className={allAllowed ? 'is-active' : ''}
+                onClick={() => onChange(orientationField, ORIENTATION_ORDER)}
+              >
+                全部允许
+              </button>
+              <button
+                type="button"
+                className={defaultOnly ? 'is-active' : ''}
+                onClick={() => onChange(orientationField, ORIENTATION_GROUPS[0].rotations)}
+              >
+                仅默认姿态
+              </button>
+            </div>
+          </div>
+          <OrientationCards
+            row={row}
+            value={row.allowed_rotations}
+            onChange={(value) => onChange(orientationField, value)}
+          />
+        </section>
+      )}
+
+      <section className="item-form-section item-more-section">
+        <button
+          type="button"
+          className="item-more-toggle"
+          aria-expanded={moreOpen}
+          onClick={() => setMoreOpen((open) => !open)}
+        >
+          <span className="item-section-title">更多参数</span>
+          <span className="item-section-hint">承重 · 客户 · 订单 · 优先级等（选填）</span>
+          <RightOutlined className={`item-more-chevron ${moreOpen ? 'is-open' : ''}`} />
+        </button>
+        {moreOpen && (
+          <div className="item-more-grid">
+            {ITEM_MORE_FIELD_KEYS.map((key) => (
+              <ItemField key={key} field={byKey[key]} row={row} onChange={onChange} />
+            ))}
+            {mustLoadField && (
+              <div className="item-field" style={{ minWidth: 0 }}>
+                <span className="field-label">{mustLoadField.label}</span>
+                <div className="item-must-load">
+                  <Switch
+                    size="small"
+                    checked={!!row.must_load}
+                    onChange={(value) => onChange(mustLoadField, value)}
+                  />
+                  <span>{row.must_load ? '必装' : '非必装'}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
     </div>
   )
 }
@@ -495,7 +906,7 @@ function OrientationFigure({ group, row, active }) {
   )
 }
 
-function LoadingAccessEditor({ field, row, value, onChange }) {
+function LoadingAccessEditor({ field, row, value, onChange, compact = false }) {
   const options = field.options || []
   const accesses = normalizeAccesses(value, row, field.defaultValue)
   const bySide = new Map(accesses.map((access) => [access.side, access]))
@@ -515,7 +926,7 @@ function LoadingAccessEditor({ field, row, value, onChange }) {
   }
 
   return (
-    <div className="access-editor">
+    <div className={`access-editor ${compact ? 'is-compact' : ''}`}>
       <div className="access-editor-note">
         <LockOutlined />
         <span>当前按整侧开口计算；门宽、门高和开口范围为高级设置</span>
@@ -548,7 +959,7 @@ function LoadingAccessEditor({ field, row, value, onChange }) {
                 <AccessFigure side={option.value} active={active} />
               </div>
               <p>{option.description}</p>
-              <AccessLockedFields row={row} side={option.value} hidden={!active} />
+              {!compact && <AccessLockedFields row={row} side={option.value} hidden={!active} />}
             </div>
           )
         })}
@@ -676,14 +1087,38 @@ function getSummary(row, fields) {
   const length = row.length ?? row.inner_length
   const width = row.width ?? row.inner_width
   const height = row.height ?? row.inner_height
-  if (length && width && height) return `${length} x ${width} x ${height} cm`
-  if (length && width) return `${length} x ${width} cm`
+  if (length && width && height) return `${length} × ${width} × ${height} cm`
+  if (length && width) return `${length} × ${width} cm`
   const nameField = fields.find((field) => field.key === 'name')
   return nameField ? row[nameField.key] : ''
 }
 
+function formatKgChip(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return `${value} kg`
+  if (number >= 1000) return `${(number / 1000).toFixed(number % 1000 === 0 ? 0 : 1)} t`
+  return `${number} kg`
+}
+
+// chip 只是把已有字段值换成更短的展示文案，数量单独放在卡片右上（×N）不再进 chips。
+function chipText(key, field, value) {
+  if (key === 'must_load') return { text: `必装 ${value ? '是' : '否'}` }
+  if (key === 'priority') return { text: `优先级 ${value}` }
+  if (key === 'weight') return { text: formatKgChip(value) }
+  if (key === 'tare_weight') return Number(value) > 0 ? { text: `自重 ${formatKgChip(value)}` } : null
+  if (key === 'max_payload') return { text: `载重 ${formatKgChip(value)}` }
+  if (key === 'max_load') return { text: `限重 ${formatKgChip(value)}` }
+  if (key === 'max_stack_height') return { text: `限高 ${value}` }
+  if (key === 'deck_height') return { text: `台面 ${value}` }
+  const option = field.options?.find((item) => item.value === value)
+  return {
+    text: `${option?.label ?? value}`,
+    tooltip: option?.description,
+  }
+}
+
 function getChips(row, fields) {
-  const keys = ['quantity', 'must_load', 'priority', 'weight', 'tare_weight', 'stacking_type', 'allowed_rotations', 'equipment_profile', 'max_payload', 'loading_accesses', 'max_load', 'max_stack_height', 'deck_height']
+  const keys = ['must_load', 'priority', 'weight', 'tare_weight', 'stacking_type', 'allowed_rotations', 'equipment_profile', 'max_payload', 'loading_accesses', 'max_load', 'max_stack_height', 'deck_height']
   return keys
     .map((key) => {
       const field = fields.find((f) => f.key === key)
@@ -692,11 +1127,7 @@ function getChips(row, fields) {
       if (field.type === 'loading_accesses') return accessChip(value, field, row)
       if (field.type === 'orientation_groups') return orientationChip(value)
       if (field.type === 'stacking_type_cards') return stackingChip(value, field)
-      const option = field.options?.find((item) => item.value === value)
-      return {
-        text: `${field.label}: ${option?.label ?? value}`,
-        tooltip: option?.description,
-      }
+      return chipText(key, field, value)
     })
     .filter(Boolean)
     .slice(0, 4)
@@ -709,7 +1140,7 @@ function accessChip(value, field, row) {
     options.find((option) => option.value === access.side)?.label || access.side
   ))
   return {
-    text: `${field.label}: ${labels.join('+')}`,
+    text: `入口 ${labels.join('+')}`,
     tooltip: accesses.map((access) => {
       const label = options.find((option) => option.value === access.side)?.label || access.side
       const defaults = accessDefaultValues(row, access.side)
@@ -719,7 +1150,7 @@ function accessChip(value, field, row) {
 }
 function stackingChip(value, field) {
   const option = field.options?.find((item) => item.value === value)
-  return { text: `${field.label}: ${option?.label ?? value}` }
+  return { text: STACKING_SHORT_LABELS[value] ?? option?.label ?? value, tooltip: option?.description }
 }
 
 function orientationChip(value) {
@@ -728,10 +1159,10 @@ function orientationChip(value) {
     group.rotations.every((rotation) => rotations.includes(rotation)),
   )
   const text = activeGroups.length === ORIENTATION_GROUPS.length
-    ? '姿态: 全部允许'
+    ? '全部朝向'
     : activeGroups.length === 1
-      ? '姿态: 仅默认'
-      : `姿态: ${activeGroups.length} 类`
+      ? '仅默认朝向'
+      : `朝向 ${activeGroups.length} 类`
   return {
     text,
     tooltip: activeGroups.map((group) => `${group.label}: ${group.description}`).join('\n'),
